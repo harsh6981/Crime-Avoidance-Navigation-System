@@ -1,33 +1,49 @@
 import { useState } from "react";
+import { Routes, Route, useNavigate } from "react-router-dom";
+
+// ── Dashboard-only components (READ ONLY — not touched) ──
 import MapView from "./components/MapView";
 import RoutePanel from "./components/RoutePanel";
-import HeatmapLegend, { HazardReport, SOSButton, AuthModal, ProfileModal, RecentTripsModal } from "./components/index";
+import HeatmapLegend, { HazardReport, SOSButton, RecentTripsModal } from "./components/index";
 import GuardianMode from "./components/GuardianMode";
 import TrustedContacts from "./components/TrustedContacts";
 import ContactsPanel from "./components/ContactsPanel";
-import { Shield, Moon, Sun, User, History, PhoneCall, AlertTriangle, Sparkles, LogOut } from "lucide-react";
+
+// ── Auth pages ──
+import Login from "./pages/Login";
+import Signup from "./pages/Signup";
+
+import { Shield, Moon, Sun, User, History, PhoneCall, AlertTriangle, Sparkles, LogOut, ChevronDown, Bookmark, Compass } from "lucide-react";
+import { useAuth } from "./context/AuthContext";
 import "./App.css";
 
-export default function App() {
-  const [user, setUser]                     = useState(null);
-  const [showAuth, setShowAuth]             = useState(false);
-  const [showProfile, setShowProfile]       = useState(false);
-  const [showRecentTrips, setShowRecentTrips] = useState(false);
-  const [routes, setRoutes]                 = useState(null);
-  const [activeRoute, setActiveRoute]       = useState("safest");
-  const [showHazardForm, setShowHazardForm] = useState(false);
-  const [showContacts, setShowContacts]     = useState(false);
-  const [mapClickCoords, setMapClickCoords] = useState(null);
-  const [source, setSource]                 = useState("");
-  const [destination, setDestination]       = useState("");
-  const [travelMode, setTravelMode]         = useState("walking");
-  const [loading, setLoading]               = useState(false);
-  const [mapError, setMapError]             = useState(null);
-  const [guardianAlert, setGuardianAlert]   = useState(null);
-  const [oledTheme, setOledTheme]           = useState(false);
+// ─────────────────────────────────────────────────────────────
+// Dashboard — contains ALL existing map/routing UI untouched
+// ─────────────────────────────────────────────────────────────
+function Dashboard() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const [showProfileDropdown, setShowProfileDropdown] = useState(false);
+  const [showRecentTrips,     setShowRecentTrips]     = useState(false);
+  const [showSavedRoutes,     setShowSavedRoutes]     = useState(false);
+  const [showHazardForm,      setShowHazardForm]      = useState(false);
+  const [showContacts,        setShowContacts]        = useState(false);
+  const [mapClickCoords,      setMapClickCoords]      = useState(null);
+  const [guardianAlert,       setGuardianAlert]       = useState(null);
+  const [oledTheme,           setOledTheme]           = useState(false);
+
+  // ── READ ONLY: all routing state lives here unchanged ──
+  const [routes,      setRoutes]      = useState(null);
+  const [activeRoute, setActiveRoute] = useState("safest");
+  const [source,      setSource]      = useState("");
+  const [destination, setDestination] = useState("");
+  const [travelMode,  setTravelMode]  = useState("walking");
+  const [loading,     setLoading]     = useState(false);
+  const [mapError,    setMapError]    = useState(null);
 
   // Heatmap Layer Toggles State
-  const [showCrimeZones, setShowCrimeZones]         = useState(true);
+  const [showCrimeZones,     setShowCrimeZones]     = useState(true);
   const [showStreetLighting, setShowStreetLighting] = useState(true);
   const [showTrafficDensity, setShowTrafficDensity] = useState(true);
 
@@ -71,19 +87,74 @@ export default function App() {
           </button>
 
           {user ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="btn-outline" onClick={() => setShowContacts(true)}>
-                <PhoneCall size={15} color="#22c55e" /> Emergency Contacts
+            <div style={{ position: "relative" }}>
+              <button
+                className="btn-outline"
+                onClick={() => setShowProfileDropdown(!showProfileDropdown)}
+                style={{ background: "rgba(59,130,246,0.15)", borderColor: "rgba(59,130,246,0.4)", display: "flex", alignItems: "center", gap: 6 }}
+              >
+                {/* Show profile photo for Google users, icon for email users */}
+                {user.profilePicture ? (
+                  <img
+                    src={user.profilePicture}
+                    alt={user.name}
+                    style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }}
+                  />
+                ) : (
+                  <User size={15} color="#3b82f6" />
+                )}
+                {user.name} <ChevronDown size={14} />
               </button>
 
-              <button className="btn-outline" onClick={() => setShowProfile(true)} style={{ background: "rgba(59,130,246,0.15)", borderColor: "rgba(59,130,246,0.4)" }}>
-                <User size={15} color="#3b82f6" /> {user.name}
-              </button>
+              {/* Profile Dropdown Menu */}
+              {showProfileDropdown && (
+                <div style={{
+                  position: "absolute",
+                  top: "calc(100% + 8px)",
+                  right: 0,
+                  width: "220px",
+                  background: "rgba(15, 23, 42, 0.95)",
+                  backdropFilter: "blur(16px)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: "14px",
+                  padding: "8px 0",
+                  zIndex: 200,
+                  boxShadow: "0 15px 35px rgba(0,0,0,0.6)"
+                }}>
+                  <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", marginBottom: "4px" }}>
+                    <div style={{ fontWeight: 700, fontSize: "0.88rem", color: "#fff" }}>{user.name}</div>
+                    <div style={{ fontSize: "0.75rem", color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis" }}>{user.email}</div>
+                  </div>
+
+                  <div className="dropdown-item" onClick={() => { setShowRecentTrips(true); setShowProfileDropdown(false); }}>
+                    <Compass size={15} color="#3b82f6" /> My Trips
+                  </div>
+
+                  <div className="dropdown-item" onClick={() => { setShowSavedRoutes(true); setShowProfileDropdown(false); }}>
+                    <Bookmark size={15} color="#f59e0b" /> Saved Routes
+                  </div>
+
+                  <div className="dropdown-item" onClick={() => { setShowContacts(true); setShowProfileDropdown(false); }}>
+                    <PhoneCall size={15} color="#22c55e" /> Emergency Contacts
+                  </div>
+
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", marginTop: "4px", paddingTop: "4px" }}>
+                    <div className="dropdown-item" onClick={() => { logout(); setShowProfileDropdown(false); }} style={{ color: "#ef4444" }}>
+                      <LogOut size={15} color="#ef4444" /> Logout
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
-            <button className="btn-primary" onClick={() => setShowAuth(true)} style={{ padding: "8px 18px", fontSize: "0.82rem" }}>
-              Sign In / Register
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn-outline" onClick={() => navigate("/login")}>
+                Sign In
+              </button>
+              <button className="btn-primary" onClick={() => navigate("/signup")} style={{ padding: "8px 18px", fontSize: "0.82rem" }}>
+                Create Account
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -109,6 +180,7 @@ export default function App() {
       <main className="main-layout">
         {/* LEFT SIDEBAR PANEL */}
         <aside className="side-panel">
+          {/* ── READ ONLY: RoutePanel with all source/destination/routing props ── */}
           <RoutePanel
             source={source}
             setSource={setSource}
@@ -150,7 +222,7 @@ export default function App() {
           </button>
         </aside>
 
-        {/* MAP CONTAINER */}
+        {/* ── READ ONLY: MAP CONTAINER ── */}
         <div className="map-wrapper">
           <MapView
             routes={routes}
@@ -165,15 +237,20 @@ export default function App() {
         </div>
       </main>
 
-      {/* MODALS */}
-      {showAuth && (
-        <AuthModal onLogin={setUser} onClose={() => setShowAuth(false)} />
-      )}
-      {showProfile && (
-        <ProfileModal user={user} onClose={() => setShowProfile(false)} />
-      )}
+      {/* OTHER MODALS */}
       {showRecentTrips && (
         <RecentTripsModal onClose={() => setShowRecentTrips(false)} />
+      )}
+      {showSavedRoutes && (
+        <div className="modal-overlay" onClick={() => setShowSavedRoutes(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">📌 Saved Routes</div>
+            </div>
+            <p style={{ color: "#94a3b8", fontSize: "0.85rem" }}>No saved routes yet. Your favorite safe paths will appear here!</p>
+            <button className="btn-outline mt-12" onClick={() => setShowSavedRoutes(false)} style={{ width: "100%" }}>Close</button>
+          </div>
+        </div>
       )}
       {showHazardForm && (
         <HazardReport
@@ -185,6 +262,40 @@ export default function App() {
       {showContacts && (
         <TrustedContacts user={user} onClose={() => setShowContacts(false)} />
       )}
+
+      <style>{`
+        .dropdown-item {
+          padding: 10px 16px;
+          font-size: 0.82rem;
+          color: #cbd5e1;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          transition: background 0.15s;
+        }
+        .dropdown-item:hover {
+          background: rgba(255, 255, 255, 0.08);
+          color: #fff;
+        }
+      `}</style>
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// App — top-level router: auth pages vs. dashboard
+// Map only renders when route is "/"
+// ─────────────────────────────────────────────────────────────
+export default function App() {
+  return (
+    <Routes>
+      {/* Auth pages — map is NEVER mounted here */}
+      <Route path="/login"  element={<Login />} />
+      <Route path="/signup" element={<Signup />} />
+
+      {/* Dashboard — map loads only on this route */}
+      <Route path="/*" element={<Dashboard />} />
+    </Routes>
   );
 }
