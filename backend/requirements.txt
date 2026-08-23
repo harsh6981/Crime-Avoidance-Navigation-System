@@ -1,0 +1,21 @@
+# Backend Python dependencies
+# Install with: pip install -r requirements.txt
+
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+asyncpg==0.29.0
+motor==3.6.0                   # MongoDB async driver
+pymongo==4.9.2                 # Compatible with motor 3.6.0
+pyjwt==2.8.0
+python-multipart==0.0.9
+scikit-learn==1.5.0            # DBSCAN clustering
+numpy==1.26.4
+requests==2.32.3
+
+# Optional — only needed if using Twilio for SOS SMS
+# twilio==9.1.0
+
+# Install PostgreSQL + PostGIS:
+# Ubuntu:  sudo apt install postgresql postgis
+# macOS:   brew install postgresql postgis
+# Windows: https://postgis.net/windows_downloads/
