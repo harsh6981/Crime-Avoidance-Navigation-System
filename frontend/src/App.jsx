@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Routes, Route, useNavigate } from "react-router-dom";
 
 // ── Dashboard-only components (READ ONLY — not touched) ──
@@ -8,277 +8,474 @@ import HeatmapLegend, { HazardReport, SOSButton, RecentTripsModal } from "./comp
 import GuardianMode from "./components/GuardianMode";
 import TrustedContacts from "./components/TrustedContacts";
 import ContactsPanel from "./components/ContactsPanel";
+import TripOverlay from "./components/TripOverlay";
+import OnRouteResources from "./components/OnRouteResources";
+import SafePathPanel from "./components/SafePathPanel";
 
 // ── Auth pages ──
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 
-import { Shield, Moon, Sun, User, History, PhoneCall, AlertTriangle, Sparkles, LogOut, ChevronDown, Bookmark, Compass } from "lucide-react";
+import { Shield, History, PhoneCall, AlertTriangle, LogOut, Bookmark, Compass, MapPin, Navigation, X, Clock, ChevronLeft, ChevronRight, Eye, Lightbulb, Car, Zap, ShieldCheck, Heart } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import "./App.css";
 
+const BACKEND_URL = "http://localhost:8000";
+
 // ─────────────────────────────────────────────────────────────
-// Dashboard — contains ALL existing map/routing UI untouched
+// Saved Routes Modal — syncs with backend + localStorage fallback
 // ─────────────────────────────────────────────────────────────
+function SavedRoutesModal({ onClose, onLoadRoute, user }) {
+  const [saved, setSaved] = useState([]);
+  const [loadingRoutes, setLoadingRoutes] = useState(true);
+
+  useEffect(() => {
+    async function fetchRoutes() {
+      // Try backend first if user is logged in
+      if (user?.user_id) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/routes/saved?user_id=${user.user_id}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.routes && data.routes.length > 0) {
+              setSaved(data.routes.map(r => ({
+                ...r,
+                source: r.source,
+                destination: r.destination,
+                travelMode: r.travel_mode,
+                safetyScore: r.safety_score,
+                savedAt: r.saved_at,
+                _id: r._id,
+              })));
+              setLoadingRoutes(false);
+              return;
+            }
+          }
+        } catch (_) { }
+      }
+      // Fallback to localStorage
+      const local = JSON.parse(localStorage.getItem("safepath_saved_routes") || "[]");
+      setSaved(local);
+      setLoadingRoutes(false);
+    }
+    fetchRoutes();
+  }, [user]);
+
+  async function handleDelete(idx) {
+    const route = saved[idx];
+    // Delete from backend
+    if (user?.user_id && route._id) {
+      try {
+        await fetch(`${BACKEND_URL}/api/routes/saved?user_id=${user.user_id}&route_id=${route._id}`, {
+          method: "DELETE",
+        });
+      } catch (_) { }
+    }
+    // Also delete from localStorage
+    const localSaved = JSON.parse(localStorage.getItem("safepath_saved_routes") || "[]");
+    const filtered = localSaved.filter(r => !(r.source === route.source && r.destination === route.destination));
+    localStorage.setItem("safepath_saved_routes", JSON.stringify(filtered));
+
+    const updated = [...saved];
+    updated.splice(idx, 1);
+    setSaved(updated);
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ width: 460 }}>
+        <div className="modal-header">
+          <div className="modal-title" style={{ display: "flex", alignItems: "center", gap: 8, color: "#e37400" }}>
+            <Bookmark size={20} /> Saved Routes
+          </div>
+          <X size={20} color="#5f6368" style={{ cursor: "pointer" }} onClick={onClose} />
+        </div>
+
+        {loadingRoutes ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "#5f6368", fontSize: "0.85rem" }}>
+            Loading saved routes…
+          </div>
+        ) : saved.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "#5f6368" }}>
+            <Bookmark size={36} style={{ margin: "0 auto 12px", display: "block", opacity: 0.3 }} />
+            <div style={{ fontSize: "0.88rem", fontWeight: 600, marginBottom: 4 }}>No saved routes yet</div>
+            <div style={{ fontSize: "0.78rem" }}>Calculate a route and tap the ★ Save button to bookmark it here.</div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0", maxHeight: "50vh", overflowY: "auto" }}>
+            {saved.map((r, idx) => (
+              <div key={r._id || idx} style={{
+                background: "#f8f9fa", border: "1px solid #dadce0",
+                borderRadius: 12, padding: 12, cursor: "pointer", transition: "border-color 0.2s",
+              }}
+                onClick={() => {
+                  if (onLoadRoute) onLoadRoute(r.source, r.destination, r.travelMode);
+                  onClose();
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.borderColor = "rgba(245,158,11,0.4)"}
+                onMouseLeave={(e) => e.currentTarget.style.borderColor = "#dadce0"}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <MapPin size={14} color="#1e8e3e" />
+                  <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "#202124" }}>{r.source}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <Navigation size={14} color="#d93025" />
+                  <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "#202124" }}>{r.destination}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", color: "#5f6368" }}>
+                  <span>Safety: <strong style={{ color: "#1e8e3e" }}>{r.safetyScore}/100</strong></span>
+                  <span>{r.savedAt ? new Date(r.savedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : ""}</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleDelete(idx); }}
+                    style={{ background: "transparent", border: "none", color: "#d93025", cursor: "pointer", fontSize: "0.72rem", fontWeight: 600 }}
+                  >✕ Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button className="btn-outline" onClick={onClose} style={{ width: "100%", marginTop: 12 }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Dynamic Recent Trips Modal — syncs with backend + localStorage fallback
+// ─────────────────────────────────────────────────────────────
+function DynamicRecentTripsModal({ onClose, user }) {
+  const [trips, setTrips] = useState([]);
+  const [loadingTrips, setLoadingTrips] = useState(true);
+
+  useEffect(() => {
+    async function fetchTrips() {
+      // Try backend first if user is logged in
+      if (user?.user_id) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/trips?user_id=${user.user_id}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.trips && data.trips.length > 0) {
+              setTrips(data.trips.map(t => ({
+                from: t.source?.length > 25 ? t.source.slice(0, 25) + "…" : t.source,
+                to: t.destination?.length > 25 ? t.destination.slice(0, 25) + "…" : t.destination,
+                date: t.date ? new Date(t.date).toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "",
+                score: `${Math.round(t.safety_score)}%`,
+                status: t.status || "Safe Arrival",
+                _fromBackend: true,
+              })));
+              setLoadingTrips(false);
+              return;
+            }
+          }
+        } catch (_) { }
+      }
+      // Fallback to localStorage
+      const stored = JSON.parse(localStorage.getItem("safepath_trips") || "[]");
+      const fallbackTrips = stored.length > 0 ? stored : [
+        { from: "Bandra Station", to: "BKC Office Complex", date: "Today, 5:40 PM", score: "96%", status: "Safe Arrival" },
+        { from: "Andheri West", to: "Airport Terminal 2", date: "Yesterday, 10:15 PM", score: "92%", status: "Safe Arrival" },
+        { from: "Dadar Circle", to: "Marine Drive", date: "25 Jun, 8:30 PM", score: "89%", status: "Safe Arrival" },
+      ];
+      setTrips(fallbackTrips);
+      setLoadingTrips(false);
+    }
+    fetchTrips();
+  }, [user]);
+
+  async function handleClearHistory() {
+    if (user?.user_id) {
+      try {
+        await fetch(`${BACKEND_URL}/api/trips?user_id=${user.user_id}`, { method: "DELETE" });
+      } catch (_) { }
+    }
+    localStorage.removeItem("safepath_trips");
+    onClose();
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ width: 460 }}>
+        <div className="modal-header">
+          <div className="modal-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <History size={20} color="#1e8e3e" /> Recent Safe Trips
+          </div>
+          <X size={20} color="#5f6368" style={{ cursor: "pointer" }} onClick={onClose} />
+        </div>
+
+        {loadingTrips ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "#5f6368", fontSize: "0.85rem" }}>
+            Loading trip history…
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0", maxHeight: "50vh", overflowY: "auto" }}>
+            {trips.map((t, idx) => (
+              <div key={idx} style={{ background: "#f8f9fa", border: "1px solid #dadce0", borderRadius: 12, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.88rem", fontWeight: 700, marginBottom: 4 }}>
+                  <span>{t.from} → {t.to}</span>
+                  <span style={{ color: "#1e8e3e" }}>{t.score}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#5f6368" }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Clock size={12} /> {t.date}</span>
+                  <span style={{ color: "#1e8e3e" }}>✓ {t.status}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {trips.length > 0 && (
+          <button
+            className="btn-outline"
+            onClick={handleClearHistory}
+            style={{ width: "100%", marginTop: 8, color: "#d93025", borderColor: "rgba(239,68,68,0.3)" }}
+          >
+            Clear Trip History
+          </button>
+        )}
+        <button className="btn-outline" onClick={onClose} style={{ width: "100%", marginTop: 8 }}>Close History</button>
+      </div>
+    </div>
+  );
+}
+
+const LAYER_CHIPS = [
+  { key: "crime", label: "Crime zones", Icon: Eye },
+  { key: "lighting", label: "Lighting", Icon: Lightbulb },
+  { key: "traffic", label: "Traffic", Icon: Car },
+  { key: "ev", label: "EV charging", Icon: Zap },
+  { key: "police", label: "Police", Icon: ShieldCheck },
+  { key: "hospital", label: "Hospitals", Icon: Heart },
+];
+
 function Dashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
   const [showProfileDropdown, setShowProfileDropdown] = useState(false);
-  const [showRecentTrips,     setShowRecentTrips]     = useState(false);
-  const [showSavedRoutes,     setShowSavedRoutes]     = useState(false);
-  const [showHazardForm,      setShowHazardForm]      = useState(false);
-  const [showContacts,        setShowContacts]        = useState(false);
-  const [mapClickCoords,      setMapClickCoords]      = useState(null);
-  const [guardianAlert,       setGuardianAlert]       = useState(null);
-  const [oledTheme,           setOledTheme]           = useState(false);
+  const [showRecentTrips, setShowRecentTrips] = useState(false);
+  const [showSavedRoutes, setShowSavedRoutes] = useState(false);
+  const [showHazardForm, setShowHazardForm] = useState(false);
+  const [showContacts, setShowContacts] = useState(false);
+  const [mapClickCoords, setMapClickCoords] = useState(null);
+  const [guardianAlert, setGuardianAlert] = useState(null);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState("directions"); // directions | safety
+  const [tripActive, setTripActive] = useState(false);
+  const [tripPos, setTripPos] = useState(null);
 
-  // ── READ ONLY: all routing state lives here unchanged ──
-  const [routes,      setRoutes]      = useState(null);
+  // ── routing state (unchanged) ──
+  const [routes, setRoutes] = useState(null);
   const [activeRoute, setActiveRoute] = useState("safest");
-  const [source,      setSource]      = useState("");
+  const [source, setSource] = useState("");
   const [destination, setDestination] = useState("");
-  const [travelMode,  setTravelMode]  = useState("walking");
-  const [loading,     setLoading]     = useState(false);
-  const [mapError,    setMapError]    = useState(null);
+  const [travelMode, setTravelMode] = useState("walking");
+  const [loading, setLoading] = useState(false);
+  const [mapError, setMapError] = useState(null);
 
-  // Heatmap Layer Toggles State
-  const [showCrimeZones,     setShowCrimeZones]     = useState(true);
+  // Layer toggles (unchanged)
+  const [showCrimeZones, setShowCrimeZones] = useState(true);
   const [showStreetLighting, setShowStreetLighting] = useState(true);
   const [showTrafficDensity, setShowTrafficDensity] = useState(true);
 
-  function toggleTheme() {
-    setOledTheme(!oledTheme);
-    if (!oledTheme) {
-      document.body.classList.add("oled-theme");
-    } else {
-      document.body.classList.remove("oled-theme");
-    }
-  }
+  // On-route resources (unchanged)
+  const [onRouteResources, setOnRouteResources] = useState([]);
+  const [showEVChargers, setShowEVChargers] = useState(true);
+  const [showPolice, setShowPolice] = useState(true);
+  const [showHospitals, setShowHospitals] = useState(true);
+
+  const chipState = {
+    crime: [showCrimeZones, setShowCrimeZones],
+    lighting: [showStreetLighting, setShowStreetLighting],
+    traffic: [showTrafficDensity, setShowTrafficDensity],
+    ev: [showEVChargers, setShowEVChargers],
+    police: [showPolice, setShowPolice],
+    hospital: [showHospitals, setShowHospitals],
+  };
 
   function handleGuardianAlert(alert) {
     setGuardianAlert(alert);
     setTimeout(() => setGuardianAlert(null), 5000);
   }
 
+  const activeRouteData = routes
+    ? (activeRoute === "safest" ? routes.safest_route : activeRoute === "alternative" ? routes.alternative_route : routes.fastest_route)
+    : null;
+  const routeNames = { safest: "Safest route", alternative: "Balanced route", fastest: "Fastest route" };
+
+  function startTrip() {
+    if (!activeRouteData?.path || activeRouteData.path.length < 2) return;
+    setTripPos(null);
+    setTripActive(true);
+    setPanelCollapsed(true);
+  }
+  function endTrip() {
+    setTripActive(false);
+    setTripPos(null);
+    setPanelCollapsed(false);
+  }
+
+  function handleLoadRoute(src, dst, mode) {
+    setSource(src);
+    setDestination(dst);
+    if (mode) setTravelMode(mode);
+    setActiveTab("directions");
+  }
+
   return (
-    <div className="app-shell">
-      {/* ── TOP NAV HEADER ── */}
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-icon-wrap">
-            <Shield size={22} color="#22c55e" />
-          </div>
+    <div className={`app-shell ${panelCollapsed ? "collapsed" : ""}`}>
+      {/* ── LEFT PANEL ── */}
+      <aside className="side-panel">
+        <div className="panel-head">
+          <div className="brand-icon-wrap"><Shield size={20} color="#1e8e3e" /></div>
           <div>
             <span className="brand-name">SafePath</span>
-            <span className="brand-tag"><Sparkles size={11} /> AI Navigation v2.0</span>
+            <span className="brand-tag">Look before you leave</span>
           </div>
         </div>
 
-        <div className="nav-actions">
-          {/* Recent Trips */}
-          <button className="btn-outline" onClick={() => setShowRecentTrips(true)} title="Recent Trips">
-            <History size={16} /> <span style={{ display: "none", smDisplay: "inline" }}>Trips</span>
+        <div className="panel-tabs" role="tablist">
+          <button role="tab" aria-selected={activeTab === "directions"}
+            className={`panel-tab ${activeTab === "directions" ? "active" : ""}`}
+            onClick={() => setActiveTab("directions")}>
+            <Navigation size={16} /> Directions
           </button>
-
-          {/* OLED / Dark Mode Toggle */}
-          <button className="btn-outline" onClick={toggleTheme} title="Toggle OLED Dark Mode">
-            {oledTheme ? <Sun size={16} color="#f59e0b" /> : <Moon size={16} color="#3b82f6" />}
+          <button role="tab" aria-selected={activeTab === "safety"}
+            className={`panel-tab ${activeTab === "safety" ? "active" : ""}`}
+            onClick={() => setActiveTab("safety")}>
+            <Shield size={16} /> Safety tools
           </button>
+        </div>
 
+        <div className="panel-body">
+          {/* Kept mounted (hidden) so route state and resource fetching survive tab switches */}
+          <div className="panel-stack" style={{ display: activeTab === "directions" ? "flex" : "none" }}>
+            <RoutePanel
+              source={source} setSource={setSource}
+              destination={destination} setDestination={setDestination}
+              travelMode={travelMode} setTravelMode={setTravelMode}
+              routes={routes} setRoutes={setRoutes}
+              activeRoute={activeRoute} setActiveRoute={setActiveRoute}
+              loading={loading} setLoading={setLoading}
+              setMapError={setMapError}
+              onStartTrip={startTrip}
+            />
+          </div>
+
+          <div className="safety-tab" style={{ display: activeTab === "safety" ? "flex" : "none" }}>
+            <OnRouteResources
+              routes={routes}
+              activeRoute={activeRoute}
+              onResourcesLoaded={setOnRouteResources}
+              showEVChargers={showEVChargers} setShowEVChargers={setShowEVChargers}
+              showPolice={showPolice} setShowPolice={setShowPolice}
+              showHospitals={showHospitals} setShowHospitals={setShowHospitals}
+            />
+            <SafePathPanel routes={routes} />
+            <GuardianMode user={user} activeRoute={activeRoute} onAlert={handleGuardianAlert} />
+            {user && <ContactsPanel user={user} />}
+            <button className="btn-hazard" onClick={() => setShowHazardForm(true)}>
+              <AlertTriangle size={18} /> Report a safety hazard
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <button className="panel-toggle" onClick={() => setPanelCollapsed(!panelCollapsed)}
+        aria-label={panelCollapsed ? "Show side panel" : "Hide side panel"}>
+        {panelCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+      </button>
+
+      {/* ── MAP AREA ── */}
+      <div className="map-wrapper">
+        <MapView
+          routes={routes}
+          activeRoute={activeRoute}
+          onMapClick={setMapClickCoords}
+          mapError={mapError}
+          showCrimeZones={showCrimeZones}
+          showStreetLighting={showStreetLighting}
+          showTrafficDensity={showTrafficDensity}
+          onRouteResources={onRouteResources}
+          showEVChargers={showEVChargers}
+          showPolice={showPolice}
+          showHospitals={showHospitals}
+          navigating={tripActive}
+          onStartTrip={startTrip}
+          followPos={tripPos}
+        />
+
+        {/* Layer chips */}
+        {!tripActive && (<div className="map-chips">
+          {LAYER_CHIPS.map(({ key, label, Icon }) => {
+            const [on, set] = chipState[key];
+            return (
+              <button key={key} className={`map-chip ${on ? "on" : ""}`} aria-pressed={on} onClick={() => set(!on)}>
+                <Icon size={15} /> {label}
+              </button>
+            );
+          })}
+        </div>)}
+
+        {tripActive && (
+          <TripOverlay route={activeRouteData} routeName={routeNames[activeRoute]} onPosition={setTripPos} onEnd={endTrip} />
+        )}
+
+        {/* Account cluster */}
+        {!tripActive && (<div className="account-cluster">
+          <button className="round-btn" onClick={() => setShowRecentTrips(true)} title="Recent trips" aria-label="Recent trips">
+            <History size={18} />
+          </button>
           {user ? (
             <div style={{ position: "relative" }}>
-              <button
-                className="btn-outline"
-                onClick={() => setShowProfileDropdown(!showProfileDropdown)}
-                style={{ background: "rgba(59,130,246,0.15)", borderColor: "rgba(59,130,246,0.4)", display: "flex", alignItems: "center", gap: 6 }}
-              >
-                {/* Show profile photo for Google users, icon for email users */}
-                {user.profilePicture ? (
-                  <img
-                    src={user.profilePicture}
-                    alt={user.name}
-                    style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }}
-                  />
-                ) : (
-                  <User size={15} color="#3b82f6" />
-                )}
-                {user.name} <ChevronDown size={14} />
+              <button className="round-btn avatar-btn" onClick={() => setShowProfileDropdown(!showProfileDropdown)}
+                aria-label="Account menu" aria-expanded={showProfileDropdown}>
+                {user.profilePicture
+                  ? <img src={user.profilePicture} alt="" />
+                  : (user.name?.charAt(0) || "U").toUpperCase()}
               </button>
-
-              {/* Profile Dropdown Menu */}
               {showProfileDropdown && (
-                <div style={{
-                  position: "absolute",
-                  top: "calc(100% + 8px)",
-                  right: 0,
-                  width: "220px",
-                  background: "rgba(15, 23, 42, 0.95)",
-                  backdropFilter: "blur(16px)",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: "14px",
-                  padding: "8px 0",
-                  zIndex: 200,
-                  boxShadow: "0 15px 35px rgba(0,0,0,0.6)"
-                }}>
-                  <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", marginBottom: "4px" }}>
-                    <div style={{ fontWeight: 700, fontSize: "0.88rem", color: "#fff" }}>{user.name}</div>
-                    <div style={{ fontSize: "0.75rem", color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis" }}>{user.email}</div>
-                  </div>
-
-                  <div className="dropdown-item" onClick={() => { setShowRecentTrips(true); setShowProfileDropdown(false); }}>
-                    <Compass size={15} color="#3b82f6" /> My Trips
-                  </div>
-
-                  <div className="dropdown-item" onClick={() => { setShowSavedRoutes(true); setShowProfileDropdown(false); }}>
-                    <Bookmark size={15} color="#f59e0b" /> Saved Routes
-                  </div>
-
-                  <div className="dropdown-item" onClick={() => { setShowContacts(true); setShowProfileDropdown(false); }}>
-                    <PhoneCall size={15} color="#22c55e" /> Emergency Contacts
-                  </div>
-
-                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", marginTop: "4px", paddingTop: "4px" }}>
-                    <div className="dropdown-item" onClick={() => { logout(); setShowProfileDropdown(false); }} style={{ color: "#ef4444" }}>
-                      <LogOut size={15} color="#ef4444" /> Logout
-                    </div>
-                  </div>
+                <div className="profile-menu">
+                  <div className="menu-head"><strong>{user.name}</strong><span>{user.email}</span></div>
+                  <button className="dropdown-item" onClick={() => { setShowRecentTrips(true); setShowProfileDropdown(false); }}>
+                    <Compass size={18} color="#5f6368" /> My trips
+                  </button>
+                  <button className="dropdown-item" onClick={() => { setShowSavedRoutes(true); setShowProfileDropdown(false); }}>
+                    <Bookmark size={18} color="#5f6368" /> Saved routes
+                  </button>
+                  <button className="dropdown-item" onClick={() => { setShowContacts(true); setShowProfileDropdown(false); }}>
+                    <PhoneCall size={18} color="#5f6368" /> Emergency contacts
+                  </button>
+                  <button className="dropdown-item" style={{ color: "#d93025" }} onClick={() => { logout(); setShowProfileDropdown(false); }}>
+                    <LogOut size={18} color="#d93025" /> Sign out
+                  </button>
                 </div>
               )}
             </div>
           ) : (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn-outline" onClick={() => navigate("/login")}>
-                Sign In
-              </button>
-              <button className="btn-primary" onClick={() => navigate("/signup")} style={{ padding: "8px 18px", fontSize: "0.82rem" }}>
-                Create Account
-              </button>
-            </div>
+            <button className="signin-btn" onClick={() => navigate("/login")}>Sign in</button>
           )}
-        </div>
-      </header>
+        </div>)}
 
-      {/* ── GUARDIAN ALERT BANNER ── */}
-      {guardianAlert && (
-        <div style={{
-          position:"fixed", top:64, left:0, right:0, zIndex:99,
-          background: guardianAlert.type==="high_risk_zone" ? "linear-gradient(135deg, rgba(239,68,68,0.95), rgba(185,28,28,0.95))" : "linear-gradient(135deg, rgba(245,158,11,0.95), rgba(180,83,9,0.95))",
-          color:"#fff", padding:"10px 24px", fontSize:"0.85rem", fontWeight:700,
-          display:"flex", alignItems:"center", gap:10, boxShadow: "0 4px 20px rgba(0,0,0,0.5)"
-        }}>
-          <AlertTriangle size={18} />
-          {guardianAlert.type==="high_risk_zone"
-            ? "WARNING: You've entered a high-crime risk zone. Guardian Mode active."
-            : "🚨 Auto-SOS countdown initiated — check guardian panel."}
-          <button style={{marginLeft:"auto",background:"transparent",border:"none",color:"#fff",cursor:"pointer"}}
-            onClick={() => setGuardianAlert(null)}>✕</button>
-        </div>
-      )}
-
-      {/* ── MAIN DASHBOARD LAYOUT ── */}
-      <main className="main-layout">
-        {/* LEFT SIDEBAR PANEL */}
-        <aside className="side-panel">
-          {/* ── READ ONLY: RoutePanel with all source/destination/routing props ── */}
-          <RoutePanel
-            source={source}
-            setSource={setSource}
-            destination={destination}
-            setDestination={setDestination}
-            travelMode={travelMode}
-            setTravelMode={setTravelMode}
-            routes={routes}
-            setRoutes={setRoutes}
-            activeRoute={activeRoute}
-            setActiveRoute={setActiveRoute}
-            loading={loading}
-            setLoading={setLoading}
-            setMapError={setMapError}
-          />
-
-          <HeatmapLegend
-            showCrimeZones={showCrimeZones}
-            setShowCrimeZones={setShowCrimeZones}
-            showStreetLighting={showStreetLighting}
-            setShowStreetLighting={setShowStreetLighting}
-            showTrafficDensity={showTrafficDensity}
-            setShowTrafficDensity={setShowTrafficDensity}
-          />
-
-          <GuardianMode
-            user={user}
-            activeRoute={activeRoute}
-            onAlert={handleGuardianAlert}
-          />
-
-          {user && <ContactsPanel user={user} />}
-
-          <button
-            className="btn-hazard"
-            onClick={() => setShowHazardForm(true)}
-          >
-            <AlertTriangle size={18} /> Report Safety Hazard
-          </button>
-        </aside>
-
-        {/* ── READ ONLY: MAP CONTAINER ── */}
-        <div className="map-wrapper">
-          <MapView
-            routes={routes}
-            activeRoute={activeRoute}
-            onMapClick={setMapClickCoords}
-            mapError={mapError}
-            showCrimeZones={showCrimeZones}
-            showStreetLighting={showStreetLighting}
-            showTrafficDensity={showTrafficDensity}
-          />
-          <SOSButton user={user} />
-        </div>
-      </main>
-
-      {/* OTHER MODALS */}
-      {showRecentTrips && (
-        <RecentTripsModal onClose={() => setShowRecentTrips(false)} />
-      )}
-      {showSavedRoutes && (
-        <div className="modal-overlay" onClick={() => setShowSavedRoutes(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-title">📌 Saved Routes</div>
-            </div>
-            <p style={{ color: "#94a3b8", fontSize: "0.85rem" }}>No saved routes yet. Your favorite safe paths will appear here!</p>
-            <button className="btn-outline mt-12" onClick={() => setShowSavedRoutes(false)} style={{ width: "100%" }}>Close</button>
+        {guardianAlert && (
+          <div className={`guardian-toast ${guardianAlert.type === "high_risk_zone" ? "danger" : "warn"}`} role="alert">
+            <AlertTriangle size={18} />
+            {guardianAlert.type === "high_risk_zone"
+              ? "You've entered a high-crime zone. Guardian Mode is active."
+              : "Auto-SOS countdown started. Open Safety tools to respond."}
+            <button onClick={() => setGuardianAlert(null)} aria-label="Dismiss">✕</button>
           </div>
-        </div>
-      )}
-      {showHazardForm && (
-        <HazardReport
-          coords={mapClickCoords}
-          user={user}
-          onClose={() => setShowHazardForm(false)}
-        />
-      )}
-      {showContacts && (
-        <TrustedContacts user={user} onClose={() => setShowContacts(false)} />
-      )}
+        )}
 
-      <style>{`
-        .dropdown-item {
-          padding: 10px 16px;
-          font-size: 0.82rem;
-          color: #cbd5e1;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          transition: background 0.15s;
-        }
-        .dropdown-item:hover {
-          background: rgba(255, 255, 255, 0.08);
-          color: #fff;
-        }
-      `}</style>
+        <SOSButton user={user} />
+      </div>
+
+      {showRecentTrips && <DynamicRecentTripsModal onClose={() => setShowRecentTrips(false)} user={user} />}
+      {showSavedRoutes && <SavedRoutesModal onClose={() => setShowSavedRoutes(false)} onLoadRoute={handleLoadRoute} user={user} />}
+      {showHazardForm && <HazardReport coords={mapClickCoords} user={user} onClose={() => setShowHazardForm(false)} />}
+      {showContacts && <TrustedContacts user={user} onClose={() => setShowContacts(false)} />}
     </div>
   );
 }
@@ -291,7 +488,7 @@ export default function App() {
   return (
     <Routes>
       {/* Auth pages — map is NEVER mounted here */}
-      <Route path="/login"  element={<Login />} />
+      <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
 
       {/* Dashboard — map loads only on this route */}

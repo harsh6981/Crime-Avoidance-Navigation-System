@@ -1,29 +1,70 @@
 import { useState, useRef, useEffect } from "react";
 import polyline from "@mapbox/polyline";
-import { 
-  MapPin, 
-  Navigation, 
-  Footprints, 
-  Bike, 
-  Car, 
-  ShieldCheck, 
-  Zap, 
-  Sparkles, 
-  CloudSun, 
+import {
+  MapPin,
+  Navigation,
+  Footprints,
+  Bike,
+  Car,
+  ShieldCheck,
+  Zap,
+  Sparkles,
+  CloudSun,
   TrafficCone,
   Activity,
-  ChevronRight
+  ChevronRight,
+  Cloud,
+  CloudRain,
+  Sun,
+  Wind,
+  Bookmark,
+  BookmarkCheck,
+  ArrowUpDown
 } from "lucide-react";
 
 const BACKEND_URL = "http://localhost:8000";
 
+// ── TomTom API key (set in frontend/.env as VITE_TOMTOM_API_KEY) ──
+const TOMTOM_KEY = import.meta.env.VITE_TOMTOM_API_KEY;
+
+const WEATHER_ICON_MAP = {
+  "sun": Sun,
+  "cloud-sun": CloudSun,
+  "cloud": Cloud,
+  "cloud-rain": CloudRain,
+  "wind": Wind,
+};
+
 const TRAVEL_MODES = [
-  { id: "walking",     label: "Walk",  Icon: Footprints },
-  { id: "cycling",     label: "Cycle", Icon: Bike },
-  { id: "two_wheeler", label: "Bike",  Icon: Zap },
-  { id: "car",         label: "Car",   Icon: Car },
+  { id: "walking", label: "Walk", Icon: Footprints },
+  { id: "cycling", label: "Cycle", Icon: Bike },
+  { id: "two_wheeler", label: "Bike", Icon: Zap },
+  { id: "car", label: "Car", Icon: Car },
 ];
 
+// ── TomTom Fuzzy Search / Autocomplete helper ──
+// Returns an array of { label, lat, lng } suggestions for a query string.
+async function tomtomSuggest(query, countrySet = "IN") {
+  if (!TOMTOM_KEY || !query || query.trim().length < 2) return [];
+  try {
+    const url = `https://api.tomtom.com/search/2/search/${encodeURIComponent(query)}.json` +
+      `?key=${TOMTOM_KEY}&limit=6&countrySet=${countrySet}&language=en-US`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.results || []).map((r) => ({
+      label: r.poi?.name
+        ? `${r.poi.name}, ${r.address?.freeformAddress || ""}`
+        : (r.address?.freeformAddress || r.address?.municipality || ""),
+      lat: r.position?.lat,
+      lng: r.position?.lon,
+    })).filter((s) => s.label && s.lat != null);
+  } catch (_) {
+    return [];
+  }
+}
+
+// Fallback static popular locations (shown when input is empty or TomTom key is absent)
 const POPULAR_LOCATIONS = [
   "Bandra Station, Mumbai",
   "Andheri West, Mumbai",
@@ -34,6 +75,96 @@ const POPULAR_LOCATIONS = [
   "Powai Lake, Mumbai",
   "Colaba Causeway, Mumbai",
 ];
+
+// ── Fallback weather logic based on time of day ──
+function getWeatherFallback() {
+  const hour = new Date().getHours();
+  const month = new Date().getMonth();
+
+  // Monsoon season (June-Sept) in Mumbai
+  const isMonsoon = month >= 5 && month <= 8;
+
+  if (isMonsoon) {
+    if (hour >= 14 && hour <= 18) {
+      return { icon: CloudRain, text: "Rain", temp: 27, visibility: "Low Vis", color: "#3b82f6" };
+    }
+    return { icon: Cloud, text: "Overcast", temp: 28, visibility: "Mod Vis", color: "#94a3b8" };
+  }
+
+  if (hour >= 6 && hour < 10) return { icon: Sun, text: "Clear", temp: 26, visibility: "High Vis", color: "#f59e0b" };
+  if (hour >= 10 && hour < 16) return { icon: Sun, text: "Sunny", temp: 32, visibility: "High Vis", color: "#f59e0b" };
+  if (hour >= 16 && hour < 19) return { icon: CloudSun, text: "Hazy", temp: 29, visibility: "Mod Vis", color: "#f59e0b" };
+  if (hour >= 19 && hour < 22) return { icon: Wind, text: "Clear", temp: 25, visibility: "High Vis", color: "#94a3b8" };
+  return { icon: Cloud, text: "Night", temp: 23, visibility: "Mod Vis", color: "#64748b" };
+}
+
+// ── Dynamic traffic info ──
+function getTrafficForTime() {
+  const hour = new Date().getHours();
+  if (hour >= 8 && hour <= 10) return { level: "Heavy", speed: 18, color: "#ef4444" };
+  if (hour >= 17 && hour <= 20) return { level: "Heavy", speed: 15, color: "#ef4444" };
+  if (hour >= 11 && hour <= 16) return { level: "Moderate", speed: 28, color: "#f59e0b" };
+  if (hour >= 21 || hour < 6) return { level: "Light", speed: 45, color: "#22c55e" };
+  return { level: "Light", speed: 35, color: "#22c55e" };
+}
+
+// ── Compute safety score dynamically ──
+function computeDynamicSafetyScore(routeType, travelMode) {
+  const hour = new Date().getHours();
+  const isNight = hour >= 20 || hour < 6;
+
+  let base;
+  if (routeType === "safest") base = 92;
+  else if (routeType === "alternative") base = 71;
+  else base = 48;
+
+  // Time penalty
+  if (isNight) base -= routeType === "safest" ? 5 : 12;
+
+  // Mode bonus
+  if (travelMode === "car") base += 4;
+  if (travelMode === "walking" && isNight) base -= 6;
+
+  // Small randomization
+  base += Math.floor(Math.random() * 5) - 2;
+
+  return Math.min(99, Math.max(15, base));
+}
+
+// ── Trip saving (localStorage + backend sync) ──
+function saveTrip(source, destination, safetyScore, userId) {
+  const trips = JSON.parse(localStorage.getItem("safepath_trips") || "[]");
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+  const trip = {
+    from: source.length > 25 ? source.slice(0, 25) + "…" : source,
+    to: destination.length > 25 ? destination.slice(0, 25) + "…" : destination,
+    date: `${dateStr}, ${timeStr}`,
+    score: `${safetyScore}%`,
+    status: "Safe Arrival",
+    timestamp: now.getTime()
+  };
+
+  trips.unshift(trip);
+  if (trips.length > 20) trips.length = 20;
+  localStorage.setItem("safepath_trips", JSON.stringify(trips));
+
+  // Also save to backend if user is logged in
+  if (userId) {
+    fetch(`${BACKEND_URL}/api/trips`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        source: source,
+        destination: destination,
+        safety_score: safetyScore,
+      }),
+    }).catch((err) => console.warn("Failed to save trip to backend:", err));
+  }
+}
 
 export default function RoutePanel({
   source, setSource,
@@ -47,9 +178,61 @@ export default function RoutePanel({
   const [error, setError] = useState(null);
   const [showSrcSuggestions, setShowSrcSuggestions] = useState(false);
   const [showDstSuggestions, setShowDstSuggestions] = useState(false);
+  const [safetyScores, setSafetyScores] = useState({ safest: 94, fastest: 48, alternative: 71 });
+  const [isSaved, setIsSaved] = useState(false);
+  const [weather, setWeather] = useState(null);
+
+  // TomTom live autocomplete suggestions
+  const [srcSuggestions, setSrcSuggestions] = useState([]);
+  const [dstSuggestions, setDstSuggestions] = useState([]);
+  // Cache resolved coords when user picks from autocomplete (avoids extra geocode call)
+  const srcCoordsRef = useRef(null);
+  const dstCoordsRef = useRef(null);
+  const srcDebounceRef = useRef(null);
+  const dstDebounceRef = useRef(null);
 
   const srcRef = useRef(null);
   const dstRef = useRef(null);
+
+  const traffic = getTrafficForTime();
+
+  // ── Fetch live weather from backend (Open-Meteo API) ──
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchWeather() {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/weather?lat=19.076&lng=72.8777`);
+        if (res.ok) {
+          const data = await res.json();
+          const iconComponent = WEATHER_ICON_MAP[data.icon] || Cloud;
+          const color = data.icon?.includes("rain") ? "#3b82f6"
+            : data.icon?.includes("cloud") ? "#94a3b8"
+              : "#f59e0b";
+          if (!cancelled) {
+            setWeather({
+              icon: iconComponent,
+              text: data.condition,
+              temp: Math.round(data.temperature),
+              visibility: data.visibility_label,
+              color,
+              source: data.source,
+            });
+          }
+          return;
+        }
+      } catch (_) { }
+      // Fallback to time-based estimation
+      if (!cancelled) setWeather(getWeatherFallback());
+    }
+    fetchWeather();
+    // Refresh weather every 10 minutes
+    const interval = setInterval(fetchWeather, 10 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // Use fallback until weather loads
+  const weatherData = weather || getWeatherFallback();
+  const WeatherIcon = weatherData.icon;
 
   // Close suggestions on outside click
   useEffect(() => {
@@ -61,6 +244,54 @@ export default function RoutePanel({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Check if current route is bookmarked
+  useEffect(() => {
+    if (routes && source && destination) {
+      const saved = JSON.parse(localStorage.getItem("safepath_saved_routes") || "[]");
+      setIsSaved(saved.some(r => r.source === source && r.destination === destination));
+    }
+  }, [routes, source, destination]);
+
+  function toggleSaveRoute() {
+    const saved = JSON.parse(localStorage.getItem("safepath_saved_routes") || "[]");
+    if (isSaved) {
+      const filtered = saved.filter(r => !(r.source === source && r.destination === destination));
+      localStorage.setItem("safepath_saved_routes", JSON.stringify(filtered));
+      setIsSaved(false);
+      // Note: backend deletion happens via SavedRoutesModal's handleDelete
+    } else {
+      const routeData = {
+        source,
+        destination,
+        travelMode,
+        savedAt: new Date().toISOString(),
+        safetyScore: safetyScores.safest
+      };
+      saved.unshift(routeData);
+      if (saved.length > 10) saved.length = 10;
+      localStorage.setItem("safepath_saved_routes", JSON.stringify(saved));
+      setIsSaved(true);
+
+      // Sync to backend
+      try {
+        const userId = JSON.parse(localStorage.getItem("safepath_user") || "{}").user_id;
+        if (userId) {
+          fetch(`${BACKEND_URL}/api/routes/saved`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: userId,
+              source,
+              destination,
+              travel_mode: travelMode,
+              safety_score: safetyScores.safest,
+            }),
+          }).catch(err => console.warn("Failed to save route to backend:", err));
+        }
+      } catch (_) { }
+    }
+  }
+
   async function calculateRoute() {
     if (!source.trim() || !destination.trim()) {
       setError("Please enter both starting point and destination.");
@@ -71,9 +302,10 @@ export default function RoutePanel({
     setLoading(true);
 
     try {
+      // Use cached coords from autocomplete selection, or geocode fresh
       const [srcCoords, dstCoords] = await Promise.all([
-        geocode(source),
-        geocode(destination),
+        srcCoordsRef.current ? Promise.resolve(srcCoordsRef.current) : geocode(source),
+        dstCoordsRef.current ? Promise.resolve(dstCoordsRef.current) : geocode(destination),
       ]);
 
       console.log("Start Coords:", srcCoords);
@@ -136,7 +368,18 @@ export default function RoutePanel({
             }
           }
         }
-      } catch (_) {}
+      } catch (_) { }
+
+      // Compute dynamic safety scores
+      const scores = {
+        safest: computeDynamicSafetyScore("safest", travelMode),
+        fastest: computeDynamicSafetyScore("fastest", travelMode),
+        alternative: computeDynamicSafetyScore("alternative", travelMode),
+      };
+      setSafetyScores(scores);
+
+      // Save trip to history
+      saveTrip(source, destination, scores.safest);
 
       setRoutes(data);
     } catch (err) {
@@ -149,222 +392,262 @@ export default function RoutePanel({
     }
   }
 
-  const activeRouteData = routes ? (activeRoute === "safest" ? routes.safest_route : routes.fastest_route) : null;
-  const safetyScore = activeRouteData ? (activeRoute === "safest" ? 94 : 48) : 88;
+  const hour = new Date().getHours();
+  const isNight = hour >= 20 || hour < 6;
+
+  function swapPlaces() {
+    const s = source;
+    setSource(destination);
+    setDestination(s);
+    // Swap cached coords too
+    const tmp = srcCoordsRef.current;
+    srcCoordsRef.current = dstCoordsRef.current;
+    dstCoordsRef.current = tmp;
+  }
+
+  function riskTag(score) {
+    if (score > 70) return { cls: "green", text: "Low risk" };
+    if (score > 50) return { cls: "amber", text: "Moderate risk" };
+    return { cls: "red", text: "High risk" };
+  }
+
+  const routeItems = routes ? [
+    { key: "safest", title: "Safest route", data: routes.safest_route, score: safetyScores.safest, badge: "Recommended", lighting: "Well lit" },
+    routes.alternative_route && { key: "alternative", title: "Balanced route", data: routes.alternative_route, score: safetyScores.alternative, lighting: "Mostly lit" },
+    { key: "fastest", title: "Fastest route", data: routes.fastest_route, score: safetyScores.fastest, lighting: "Partly lit" },
+  ].filter(Boolean) : [];
 
   return (
-    <div className="flex flex-col gap-16">
-      {/* ── REAL-TIME SAFETY METER & OVERLAYS ── */}
-      <div className="panel-card" style={{ background: "linear-gradient(135deg, rgba(34,197,94,0.1), rgba(15,23,42,0.8))", border: "1px solid rgba(34,197,94,0.3)" }}>
-        <div className="section-header">
-          <span className="section-title"><Activity size={15} color="#22c55e" /> Real-Time Safety Index</span>
-          <span style={{ fontSize: "0.72rem", color: "var(--accent-green)", fontWeight: 700, background: "rgba(34,197,94,0.15)", padding: "2px 8px", borderRadius: 12 }}>
-            Live Monitor
-          </span>
-        </div>
-        
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "8px 0" }}>
-          <div>
-            <div style={{ fontSize: "2rem", fontWeight: 800, color: safetyScore > 70 ? "var(--accent-green)" : "var(--accent-amber)" }}>
-              {safetyScore}<span style={{ fontSize: "1rem", color: "var(--text-muted)" }}>/100</span>
-            </div>
-            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-              {safetyScore > 70 ? "🛡️ Optimal Safety Conditions" : "⚠️ Moderate Risk Route"}
-            </div>
-          </div>
-          <div style={{ width: 60, height: 60, borderRadius: "50%", background: `conic-gradient(${safetyScore > 70 ? "#22c55e" : "#f59e0b"} ${safetyScore * 3.6}deg, rgba(255,255,255,0.1) 0deg)`, display: "flex", alignItems: "center", justifyContent: "center", padding: 6 }}>
-            <div style={{ width: "100%", height: "100%", borderRadius: "50%", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <ShieldCheck size={24} color={safetyScore > 70 ? "#22c55e" : "#f59e0b"} />
-            </div>
-          </div>
+    <div style={{ width: "100%" }}>
+      {/* ── DIRECTIONS CARD ── */}
+      <div className="dir-card">
+        <div className="mode-tabs" role="radiogroup" aria-label="Travel mode">
+          {TRAVEL_MODES.map(({ id, label, Icon }) => (
+            <button key={id} role="radio" aria-checked={travelMode === id}
+              className={`mode-tab ${travelMode === id ? "active" : ""}`}
+              onClick={() => setTravelMode(id)}>
+              <Icon size={20} />
+              <span>{label}</span>
+            </button>
+          ))}
         </div>
 
-        {/* Live Traffic & Weather Overlay Pills */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
-          <div style={{ background: "rgba(0,0,0,0.25)", padding: "6px 10px", borderRadius: 8, fontSize: "0.72rem", display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)" }}>
-            <TrafficCone size={14} color="#f59e0b" /> Traffic: Light • 32 km/h
+        <div className="dir-fields">
+          <div className="dir-dots" aria-hidden="true">
+            <div className="dir-dot-a" />
+            <div className="dir-dot-line" />
+            <MapPin size={18} color="#d93025" />
           </div>
-          <div style={{ background: "rgba(0,0,0,0.25)", padding: "6px 10px", borderRadius: 8, fontSize: "0.72rem", display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)" }}>
-            <CloudSun size={14} color="#3b82f6" /> Clear • 26°C High Vis
-          </div>
-        </div>
-      </div>
 
-      {/* ── ROUTE INPUT FORM ── */}
-      <div className="panel-card">
-        <div className="section-header">
-          <span className="section-title"><Navigation size={15} color="#3b82f6" /> Navigation Planner</span>
-        </div>
-
-        {/* Starting Location */}
-        <div className="input-group" ref={srcRef}>
-          <div className="input-icon-wrapper">
-            <MapPin size={16} color="#22c55e" />
-          </div>
-          <input
-            className="input-field"
-            placeholder="From: e.g. Bandra Station, Mumbai"
-            value={source}
-            onChange={(e) => { setSource(e.target.value); setShowSrcSuggestions(true); }}
-            onFocus={() => setShowSrcSuggestions(true)}
-            onKeyDown={(e) => e.key === "Enter" && calculateRoute()}
-          />
-          {showSrcSuggestions && (
-            <div className="suggestions-dropdown">
-              {POPULAR_LOCATIONS.filter(l => l.toLowerCase().includes(source.toLowerCase())).map((loc, idx) => (
-                <div key={idx} className="suggestion-item" onClick={() => { setSource(loc); setShowSrcSuggestions(false); }}>
-                  <MapPin size={12} color="#94a3b8" /> {loc}
+          <div className="dir-inputs">
+            <div className="dir-input-wrap" ref={srcRef}>
+              <input
+                className="dir-input"
+                aria-label="Starting point"
+                placeholder="Choose starting point"
+                value={source}
+                onChange={(e) => {
+                  setSource(e.target.value);
+                  srcCoordsRef.current = null; // invalidate cached coords on manual edit
+                  setShowSrcSuggestions(true);
+                  // Debounced TomTom autocomplete
+                  clearTimeout(srcDebounceRef.current);
+                  const q = e.target.value;
+                  if (q.trim().length >= 2) {
+                    srcDebounceRef.current = setTimeout(async () => {
+                      const suggs = await tomtomSuggest(q);
+                      setSrcSuggestions(suggs);
+                    }, 350);
+                  } else {
+                    setSrcSuggestions([]);
+                  }
+                }}
+                onFocus={() => setShowSrcSuggestions(true)}
+                onKeyDown={(e) => e.key === "Enter" && calculateRoute()}
+              />
+              {showSrcSuggestions && (
+                <div className="suggestions-dropdown">
+                  {srcSuggestions.length > 0
+                    ? srcSuggestions.map((s, i) => (
+                        <div key={i} className="suggestion-item" onClick={() => {
+                          setSource(s.label);
+                          srcCoordsRef.current = { lat: s.lat, lng: s.lng };
+                          setSrcSuggestions([]);
+                          setShowSrcSuggestions(false);
+                        }}>
+                          <MapPin size={16} color="#1a73e8" /> {s.label}
+                        </div>
+                      ))
+                    : POPULAR_LOCATIONS.filter(l => l.toLowerCase().includes(source.toLowerCase())).map((loc) => (
+                        <div key={loc} className="suggestion-item" onClick={() => {
+                          setSource(loc);
+                          srcCoordsRef.current = null;
+                          setShowSrcSuggestions(false);
+                        }}>
+                          <MapPin size={16} color="#5f6368" /> {loc}
+                        </div>
+                      ))
+                  }
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
 
-        {/* Destination Location */}
-        <div className="input-group" ref={dstRef}>
-          <div className="input-icon-wrapper">
-            <Navigation size={16} color="#ef4444" />
-          </div>
-          <input
-            className="input-field"
-            placeholder="To: e.g. Andheri West, Mumbai"
-            value={destination}
-            onChange={(e) => { setDestination(e.target.value); setShowDstSuggestions(true); }}
-            onFocus={() => setShowDstSuggestions(true)}
-            onKeyDown={(e) => e.key === "Enter" && calculateRoute()}
-          />
-          {showDstSuggestions && (
-            <div className="suggestions-dropdown">
-              {POPULAR_LOCATIONS.filter(l => l.toLowerCase().includes(destination.toLowerCase())).map((loc, idx) => (
-                <div key={idx} className="suggestion-item" onClick={() => { setDestination(loc); setShowDstSuggestions(false); }}>
-                  <Navigation size={12} color="#94a3b8" /> {loc}
+            <div className="dir-input-wrap" ref={dstRef}>
+              <input
+                className="dir-input"
+                aria-label="Destination"
+                placeholder="Choose destination"
+                value={destination}
+                onChange={(e) => {
+                  setDestination(e.target.value);
+                  dstCoordsRef.current = null; // invalidate cached coords on manual edit
+                  setShowDstSuggestions(true);
+                  // Debounced TomTom autocomplete
+                  clearTimeout(dstDebounceRef.current);
+                  const q = e.target.value;
+                  if (q.trim().length >= 2) {
+                    dstDebounceRef.current = setTimeout(async () => {
+                      const suggs = await tomtomSuggest(q);
+                      setDstSuggestions(suggs);
+                    }, 350);
+                  } else {
+                    setDstSuggestions([]);
+                  }
+                }}
+                onFocus={() => setShowDstSuggestions(true)}
+                onKeyDown={(e) => e.key === "Enter" && calculateRoute()}
+              />
+              {showDstSuggestions && (
+                <div className="suggestions-dropdown">
+                  {dstSuggestions.length > 0
+                    ? dstSuggestions.map((s, i) => (
+                        <div key={i} className="suggestion-item" onClick={() => {
+                          setDestination(s.label);
+                          dstCoordsRef.current = { lat: s.lat, lng: s.lng };
+                          setDstSuggestions([]);
+                          setShowDstSuggestions(false);
+                        }}>
+                          <MapPin size={16} color="#1a73e8" /> {s.label}
+                        </div>
+                      ))
+                    : POPULAR_LOCATIONS.filter(l => l.toLowerCase().includes(destination.toLowerCase())).map((loc) => (
+                        <div key={loc} className="suggestion-item" onClick={() => {
+                          setDestination(loc);
+                          dstCoordsRef.current = null;
+                          setShowDstSuggestions(false);
+                        }}>
+                          <MapPin size={16} color="#5f6368" /> {loc}
+                        </div>
+                      ))
+                  }
                 </div>
-              ))}
+              )}
             </div>
-          )}
+          </div>
+
+          <button className="swap-btn" onClick={swapPlaces} title="Swap start and destination" aria-label="Swap start and destination">
+            <ArrowUpDown size={18} />
+          </button>
         </div>
 
-        {/* Travel Mode Pills */}
-        <div style={{ marginBottom: 6 }}>
-          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600, marginBottom: 8, textTransform: "uppercase" }}>
-            Select Transport Mode
-          </div>
-          <div className="mode-pills">
-            {TRAVEL_MODES.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                className={`mode-pill ${travelMode === id ? "active" : ""}`}
-                onClick={() => setTravelMode(id)}
-              >
-                <Icon size={18} />
-                <span>{label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+        {error && <div className="dir-error" role="alert">{error}</div>}
 
-        {error && (
-          <div style={{ color: "var(--accent-red)", fontSize: "0.78rem", marginBottom: 12, fontWeight: 600 }}>
-            ⚠️ {error}
-          </div>
-        )}
-
-        <button className="btn-primary" onClick={calculateRoute} disabled={loading}>
-          {loading ? (
-            <>Calculating Safe Path...</>
-          ) : (
-            <><ShieldCheck size={18} /> Calculate Safe Route</>
-          )}
+        <button className="dir-go" onClick={calculateRoute} disabled={loading}>
+          {loading ? "Finding safe routes…" : <><ShieldCheck size={18} /> Get safe directions</>}
         </button>
       </div>
 
-      {/* ── ROUTE SELECTION CARDS ── */}
-      {routes && (
-        <div className="panel-card">
-          <div className="section-header">
-            <span className="section-title"><Zap size={15} color="#f59e0b" /> Available Route Options</span>
-          </div>
+      {/* ── CONDITIONS ── */}
+      <div className="cond-strip">
+        <span className="cond-pill"><TrafficCone size={14} color={traffic.color} /> {traffic.level} traffic · {traffic.speed} km/h</span>
+        <span className="cond-pill"><WeatherIcon size={14} color={weatherData.color} /> {weatherData.text} · {weatherData.temp}°C</span>
+        <span className="cond-pill"><Activity size={14} color="#1e8e3e" /> {isNight ? "Night watch" : "Live monitor"}</span>
+      </div>
+      {isNight && (
+        <div className="night-note">It's night. Safety scores are lowered for poor visibility and fewer people around.</div>
+      )}
 
-          {/* SAFEST ROUTE CARD */}
-          <div
-            className={`route-card ${activeRoute === "safest" ? "active-safe" : ""}`}
-            onClick={() => setActiveRoute("safest")}
-          >
-            <div className="route-badge safe">
-              <ShieldCheck size={13} /> Safest Route (Recommended)
-            </div>
-            <div className="route-stats-grid">
-              <div className="stat-box">
-                <div className="stat-val">{routes.safest_route?.distance_km} <span style={{fontSize:"0.7rem"}}>km</span></div>
-                <div className="stat-lbl">Distance</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-val">{routes.safest_route?.eta_mins} <span style={{fontSize:"0.7rem"}}>min</span></div>
-                <div className="stat-lbl">ETA</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-val" style={{ color: "var(--accent-green)" }}>94/100</div>
-                <div className="stat-lbl">Safety</div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", color: "var(--text-muted)", marginTop: 6, padding: "0 2px" }}>
-              <span>Risk Level: <strong style={{ color: "var(--accent-green)" }}>Low (2.1% risk)</strong></span>
-              <span>Lighting: <strong>100% Lit</strong></span>
-            </div>
-
-            {routes.safest_route?.alerts?.map((a, i) => (
-              <div key={i} style={{ marginTop: 8, fontSize: "0.74rem", color: "var(--accent-green)", background: "rgba(34,197,94,0.1)", padding: "6px 10px", borderRadius: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                ✓ {a}
-              </div>
-            ))}
-          </div>
-
-          {/* FASTEST ROUTE CARD */}
-          <div
-            className={`route-card ${activeRoute === "fastest" ? "active-fast" : ""}`}
-            onClick={() => setActiveRoute("fastest")}
-          >
-            <div className="route-badge fast">
-              <Zap size={13} /> Fastest Route
-            </div>
-            <div className="route-stats-grid">
-              <div className="stat-box">
-                <div className="stat-val">{routes.fastest_route?.distance_km} <span style={{fontSize:"0.7rem"}}>km</span></div>
-                <div className="stat-lbl">Distance</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-val">{routes.fastest_route?.eta_mins} <span style={{fontSize:"0.7rem"}}>min</span></div>
-                <div className="stat-lbl">ETA</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-val" style={{ color: "var(--accent-amber)" }}>48/100</div>
-                <div className="stat-lbl">Safety</div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", color: "var(--text-muted)", marginTop: 6, padding: "0 2px" }}>
-              <span>Risk Level: <strong style={{ color: "var(--accent-amber)" }}>Moderate (18.4% risk)</strong></span>
-              <span>Lighting: <strong>Partial</strong></span>
-            </div>
-          </div>
-
-          {/* ── AI RECOMMENDATION CARD ── */}
-          <div className="ai-recommendation-card">
-            <div className="ai-rec-title">
-              <Sparkles size={14} /> AI Safety Insight
-            </div>
-            <div className="ai-rec-text">
-              "Avoid the SV Road shortcut after 10 PM due to low street lighting and isolated footpaths. SafePath automatically routed you via well-lit Link Road."
-            </div>
-          </div>
+      {/* ── RESULTS ── */}
+      {!routes ? (
+        <div className="empty-hint">
+          Enter a start and destination to compare the safest, balanced and fastest routes.
         </div>
+      ) : (
+        <>
+          <div className="route-head">
+            <span>{routeItems.length} routes</span>
+            <button className={`save-btn ${isSaved ? "saved" : ""}`} onClick={toggleSaveRoute}
+              title={isSaved ? "Remove from saved routes" : "Save this route"}>
+              {isSaved ? <BookmarkCheck size={14} /> : <Bookmark size={14} />}
+              {isSaved ? "Saved" : "Save"}
+            </button>
+          </div>
+
+          {routeItems.map(({ key, title, data, score, badge, lighting }) => {
+            const rt = riskTag(score);
+            return (
+              <div key={key} role="button" tabIndex={0}
+                className={`route-item ${key} ${activeRoute === key ? "active" : ""}`}
+                onClick={() => setActiveRoute(key)}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setActiveRoute(key)}>
+                <div className="route-title">
+                  {title}
+                  {badge && <span className="tag green">{badge}</span>}
+                </div>
+                <div className="route-eta">{data?.eta_mins} min</div>
+                <div className="route-sub">
+                  <span className={`tag ${rt.cls}`}>{rt.text}</span>&nbsp; Safety {score}/100 · {lighting}
+                </div>
+                <div className="route-dist">{data?.distance_km} km</div>
+                {key === "safest" && data?.alerts?.length > 0 && (
+                  <div className="route-alerts">
+                    {data.alerts.map((a, i) => <span key={i}>✓ {a}</span>)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div className="ai-card">
+            <strong><Sparkles size={14} color="#1a73e8" /> Safety insight</strong>
+            {isNight
+              ? `It's night, so the safest route stays on well-patrolled main roads and avoids unlit stretches. Scores are lowered ${travelMode === "walking" ? "significantly" : "slightly"} for ${travelMode}.`
+              : "Avoid the SV Road shortcut after 10 PM. It has weak street lighting and isolated footpaths, so SafePath routed you via the well-lit Link Road."}
+          </div>
+        </>
       )}
     </div>
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// TomTom Geocoding API v2
+// Primary: TomTom Geocoding REST API v2 (Orbis Maps)
+// Fallback: Nominatim (OpenStreetMap) if TomTom key is missing/fails
+// ─────────────────────────────────────────────────────────────
 async function geocode(query) {
+  // ── 1. TomTom Geocoding API v2 (primary) ──
+  if (TOMTOM_KEY) {
+    try {
+      const url =
+        `https://api.tomtom.com/search/2/geocode/${encodeURIComponent(query)}.json` +
+        `?key=${TOMTOM_KEY}&limit=1&countrySet=IN&language=en-US`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const first = data.results?.[0];
+        if (first?.position) {
+          const result = { lat: first.position.lat, lng: first.position.lon };
+          console.log(`[TomTom Geocode] "${query}" →`, result);
+          return result;
+        }
+      }
+    } catch (err) {
+      console.warn("[TomTom Geocode] failed, falling back to Nominatim:", err);
+    }
+  }
+
+  // ── 2. Nominatim fallback ──
   try {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`,
@@ -372,14 +655,14 @@ async function geocode(query) {
     );
     const data = await res.json();
     if (!data.length) {
-      console.warn("Geocode no result for:", query);
+      console.warn("[Nominatim] No result for:", query);
       return null;
     }
     const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-    console.log(`[Geocode Result] "${query}" ->`, result);
+    console.log(`[Nominatim Fallback] "${query}" →`, result);
     return result;
   } catch (err) {
-    console.error("Geocode failed for:", query, err);
+    console.error("[Geocode] Both TomTom and Nominatim failed for:", query, err);
     return null;
   }
 }
@@ -387,24 +670,48 @@ async function geocode(query) {
 async function getMockRoutes(src, dst) {
   let safePath = [];
   let fastPath = [];
+  let altPath = [];
 
   try {
     // Direct road route for fastest
-    const fastRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${dst.lng},${dst.lat}?overview=full&geometries=geojson`);
+    const fastRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${dst.lng},${dst.lat}?overview=full&geometries=geojson&alternatives=true`);
     if (fastRes.ok) {
       const fastData = await fastRes.json();
-      const coords = fastData?.routes?.[0]?.geometry?.coordinates || [];
-      fastPath = coords.map(c => [c[1], c[0]]); // convert [lng, lat] -> [lat, lng]
+      const routes = fastData?.routes || [];
+
+      // Primary fast route
+      if (routes[0]) {
+        fastPath = routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+      }
+
+      // If OSRM returned an alternative, use it
+      if (routes[1]) {
+        altPath = routes[1].geometry.coordinates.map(c => [c[1], c[0]]);
+      }
     }
 
-    // Arterial avenue route for safest
-    const viaLat = (src.lat + dst.lat) / 2 + 0.003;
-    const viaLng = (src.lng + dst.lng) / 2 + 0.003;
+    // Arterial avenue route for safest (via waypoint offset for a different route)
+    const viaLat = (src.lat + dst.lat) / 2 + 0.004;
+    const viaLng = (src.lng + dst.lng) / 2 + 0.004;
     const safeRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${viaLng},${viaLat};${dst.lng},${dst.lat}?overview=full&geometries=geojson`);
     if (safeRes.ok) {
       const safeData = await safeRes.json();
       const coords = safeData?.routes?.[0]?.geometry?.coordinates || [];
       safePath = coords.map(c => [c[1], c[0]]);
+    }
+
+    // If no alternative yet, generate one with a different waypoint
+    if (altPath.length === 0) {
+      const altViaLat = (src.lat + dst.lat) / 2 - 0.003;
+      const altViaLng = (src.lng + dst.lng) / 2 - 0.002;
+      try {
+        const altRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${altViaLng},${altViaLat};${dst.lng},${dst.lat}?overview=full&geometries=geojson`);
+        if (altRes.ok) {
+          const altData = await altRes.json();
+          const coords = altData?.routes?.[0]?.geometry?.coordinates || [];
+          altPath = coords.map(c => [c[1], c[0]]);
+        }
+      } catch (_) { }
     }
   } catch (e) {
     console.error("OSRM direct fetch failed:", e);
@@ -417,20 +724,53 @@ async function getMockRoutes(src, dst) {
   if (safePath.length === 0) {
     safePath = fastPath;
   }
+  if (altPath.length === 0) {
+    altPath = fastPath;
+  }
+
+  // Compute realistic distances
+  const safeDist = computePathDistance(safePath);
+  const fastDist = computePathDistance(fastPath);
+  const altDist = computePathDistance(altPath);
 
   return {
     safest_route: {
       path: safePath,
-      distance_km: "5.1",
-      eta_mins: "18",
+      distance_km: safeDist.toFixed(1),
+      eta_mins: Math.max(1, Math.round((safeDist / 5) * 60)).toString(),
       safety_rating: "High",
+      safety_score: 8.5,
       alerts: ["Avoided unlit alleyway near SV Road", "Routed via police-patrolled main avenue"],
     },
     fastest_route: {
       path: fastPath,
-      distance_km: "4.2",
-      eta_mins: "14",
+      distance_km: fastDist.toFixed(1),
+      eta_mins: Math.max(1, Math.round((fastDist / 6) * 60)).toString(),
       safety_rating: "Low",
+      safety_score: 3.5,
+    },
+    alternative_route: {
+      path: altPath,
+      distance_km: altDist.toFixed(1),
+      eta_mins: Math.max(1, Math.round((altDist / 5.5) * 60)).toString(),
+      safety_rating: "Moderate",
+      safety_score: 6.0,
     },
   };
+}
+
+// Haversine distance calculation for path
+function computePathDistance(coords) {
+  if (!coords || coords.length < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const [lat1, lon1] = coords[i - 1];
+    const [lat2, lon2] = coords[i];
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    total += R * 2 * Math.asin(Math.sqrt(a));
+  }
+  return total;
 }
