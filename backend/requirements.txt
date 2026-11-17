@@ -18,4 +18,4 @@ requests==2.32.3
 # Install PostgreSQL + PostGIS:
 # Ubuntu:  sudo apt install postgresql postgis
 # macOS:   brew install postgresql postgis
-# Windows: https://postgis.net/windows_downloads/
+# Windows: https://postgis.net/windows_downloads/python-dotenv
