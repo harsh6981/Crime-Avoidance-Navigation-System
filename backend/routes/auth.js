@@ -15,9 +15,10 @@ const handleSignup = async (req, res) => {
   try {
     const { name, email, phone, password, guardianContact } = req.body;
 
-    if (!name || !email || !phone || !password) {
-      return res.status(400).json({ message: "All required fields must be provided." });
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "Name, email, and password are required." });
     }
+    const userPhone = phone || req.body.phone_number || "";
 
     let existingUser = null;
     try {
@@ -38,7 +39,7 @@ const handleSignup = async (req, res) => {
       newUser = new User({
         name,
         email: email.toLowerCase(),
-        phone,
+        phone: userPhone,
         password: hashedPassword,
         guardianContact: guardianContact || "",
       });
@@ -48,7 +49,7 @@ const handleSignup = async (req, res) => {
         _id: "mem_" + Date.now(),
         name,
         email: email.toLowerCase(),
-        phone,
+        phone: userPhone,
         password: hashedPassword,
         guardianContact: guardianContact || "",
       };
@@ -145,9 +146,11 @@ const handleMe = async (req, res) => {
   }
 };
 
-// Mount routes for both `/signup`, `/login` and `/api/auth/signup`, `/api/auth/login`
+// Mount routes for `/signup`, `/register`, `/login` and `/api/auth/*`
 router.post("/signup", handleSignup);
+router.post("/register", handleSignup);
 router.post("/login", handleLogin);
 router.get("/me", authMiddleware, handleMe);
+router.get("/user", authMiddleware, handleMe);
 
 module.exports = router;

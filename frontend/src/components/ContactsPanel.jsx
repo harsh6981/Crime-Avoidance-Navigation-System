@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 export default function ContactsPanel({ user }) {
   const [contacts, setContacts] = useState([]);
@@ -16,8 +15,10 @@ export default function ContactsPanel({ user }) {
   }, [user]);
 
   async function fetchContacts() {
+    const uid = user?.user_id || user?.id;
+    if (!uid) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/users/trusted-contacts?user_id=${user.user_id}`);
+      const res = await fetch(`${BACKEND_URL}/api/users/trusted-contacts?user_id=${encodeURIComponent(uid)}`);
       if (res.ok) {
         const data = await res.json();
         setContacts(data.contacts || []);
@@ -48,13 +49,19 @@ export default function ContactsPanel({ user }) {
       return;
     }
 
+    const uid = user?.user_id || user?.id;
+    if (!uid) {
+      setError("Please sign in to manage contacts.");
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch(`${BACKEND_URL}/api/users/trusted-contacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: user.user_id,
+          user_id: uid,
           contacts: [{ name, phone }]
         }),
       });
@@ -77,12 +84,15 @@ export default function ContactsPanel({ user }) {
   async function handleDeleteContact(phoneToDelete) {
     if (!window.confirm("Are you sure you want to delete this contact?")) return;
     
+    const uid = user?.user_id || user?.id;
+    if (!uid) return;
+
     try {
       const res = await fetch(`${BACKEND_URL}/api/users/trusted-contacts`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: user.user_id,
+          user_id: uid,
           phone: phoneToDelete
         }),
       });
@@ -119,6 +129,8 @@ export default function ContactsPanel({ user }) {
           <label className="form-label">Phone Number</label>
           <input
             className="input-field"
+            type="tel"
+            inputMode="tel"
             placeholder="+91XXXXXXXXXX"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
@@ -135,6 +147,7 @@ export default function ContactsPanel({ user }) {
           className="btn-primary" 
           onClick={handleAddContact} 
           disabled={loading || contacts.length >= 5}
+          style={{ minHeight: 44, width: "100%", marginTop: 4 }}
         >
           {loading ? "Adding..." : "Add Contact"}
         </button>
@@ -148,25 +161,31 @@ export default function ContactsPanel({ user }) {
             justifyContent: "space-between", 
             alignItems: "center",
             background: "rgba(15, 23, 42, 0.5)",
-            padding: "8px 12px",
+            padding: "10px 14px",
             borderRadius: "var(--radius-sm)",
             border: "1px solid var(--border)"
           }}>
             <div>
-              <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>{c.name}</div>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{c.phone}</div>
+              <div style={{ fontSize: "0.88rem", fontWeight: 600 }}>{c.name}</div>
+              <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{c.phone}</div>
             </div>
             <button 
               onClick={() => handleDeleteContact(c.phone)}
               style={{
-                background: "transparent",
-                border: "none",
+                background: "rgba(239, 68, 68, 0.1)",
+                border: "1px solid rgba(239, 68, 68, 0.2)",
+                borderRadius: 8,
                 color: "var(--accent-red)",
                 cursor: "pointer",
-                fontSize: "1rem",
-                padding: "4px"
+                width: 36,
+                height: 36,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "1.1rem",
               }}
               title="Delete Contact"
+              aria-label={`Delete ${c.name}`}
             >
               ×
             </button>

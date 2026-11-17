@@ -1,17 +1,53 @@
 import React, { createContext, useState, useEffect, useContext } from "react";
+import { AUTH_API } from "../config/api";
 
 const AuthContext = createContext();
-const AUTH_API = "http://localhost:5000";
+
+/**
+ * Normalizes user objects so that both user.id and user.user_id (and user._id)
+ * are always consistently available across all application components.
+ */
+export function normalizeUser(rawUser) {
+  if (!rawUser) return null;
+  const uid = rawUser.id || rawUser.user_id || rawUser._id || null;
+  return {
+    ...rawUser,
+    id: uid,
+    user_id: uid,
+    _id: uid,
+  };
+}
 
 export const AuthProvider = ({ children }) => {
-  const [user,    setUser]    = useState(null);
+  const [user,    setUser]    = useState(() => {
+    try {
+      const cached = localStorage.getItem("safepath_user");
+      return cached ? normalizeUser(JSON.parse(cached)) : null;
+    } catch (_) {
+      return null;
+    }
+  });
   const [token,   setToken]   = useState(localStorage.getItem("token") || null);
   const [loading, setLoading] = useState(true);
+
+  // Helper to persist user and token session
+  const saveSession = (rawUser, tokenStr) => {
+    const normalized = normalizeUser(rawUser);
+    setUser(normalized);
+    if (tokenStr) {
+      setToken(tokenStr);
+      localStorage.setItem("token", tokenStr);
+      localStorage.setItem("safepath_token", tokenStr);
+    }
+    if (normalized) {
+      localStorage.setItem("safepath_user", JSON.stringify(normalized));
+    }
+  };
 
   // ── Restore session on mount ──
   useEffect(() => {
     async function loadUser() {
-      const storedToken = localStorage.getItem("token");
+      const storedToken = localStorage.getItem("token") || localStorage.getItem("safepath_token");
       if (storedToken) {
         try {
           const res = await fetch(`${AUTH_API}/me`, {
@@ -19,10 +55,11 @@ export const AuthProvider = ({ children }) => {
           });
           if (res.ok) {
             const data = await res.json();
-            setUser(data.user);
-            setToken(storedToken);
+            saveSession(data.user, storedToken);
           } else {
             localStorage.removeItem("token");
+            localStorage.removeItem("safepath_token");
+            localStorage.removeItem("safepath_user");
             setToken(null);
             setUser(null);
           }
@@ -44,9 +81,7 @@ export const AuthProvider = ({ children }) => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.message || "Login failed");
-    localStorage.setItem("token", data.token);
-    setToken(data.token);
-    setUser(data.user);
+    saveSession(data.user, data.token);
     return data;
   };
 
@@ -59,9 +94,7 @@ export const AuthProvider = ({ children }) => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.message || "Signup failed");
-    localStorage.setItem("token", data.token);
-    setToken(data.token);
-    setUser(data.user);
+    saveSession(data.user, data.token);
     return data;
   };
 
@@ -80,9 +113,7 @@ export const AuthProvider = ({ children }) => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Google login failed");
-      localStorage.setItem("token", data.token);
-      setToken(data.token);
-      setUser(data.user);
+      saveSession(data.user, data.token);
       return data;
     } catch (backendErr) {
       // ── Dev Fallback ──
@@ -100,9 +131,7 @@ export const AuthProvider = ({ children }) => {
         authProvider:   "google",
       };
       const devToken = "google_dev_token_" + Date.now();
-      localStorage.setItem("token", devToken);
-      setToken(devToken);
-      setUser(devUser);
+      saveSession(devUser, devToken);
       return { user: devUser, token: devToken };
     }
   };
@@ -110,6 +139,8 @@ export const AuthProvider = ({ children }) => {
   // ── Logout ──
   const logout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("safepath_token");
+    localStorage.removeItem("safepath_user");
     setToken(null);
     setUser(null);
   };

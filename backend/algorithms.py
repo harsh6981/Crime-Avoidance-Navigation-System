@@ -26,47 +26,61 @@ TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "YOUR_TOMTOM_API_KEY_HERE")
 #    Used for: "Show me 3 safe route options"
 # ═══════════════════════════════════════════════════════════
 
-def yens_k_shortest(graph: dict, source, destination, k: int = 3) -> list:
+def yens_k_shortest(graph: dict, source, destination, k: int = 3, max_spurs: int = 15) -> list:
     """
-    Yen's K-Shortest Paths Algorithm.
+    Optimized Yen's K-Shortest Paths Algorithm.
 
     Returns up to k distinct paths from source to destination,
     ranked by composite cost (safety + distance).
+    Uses A* heuristic towards destination and focuses spur exploration
+    on genuine road network intersections (degree > 2) for maximum efficiency.
 
     Args:
         graph:       {"nodes": {id: (lat,lng)}, "edges": {id: {neighbor: edge_data}}}
         source:      node id of start
         destination: node id of end
         k:           number of alternative paths to return
+        max_spurs:   maximum number of candidate spur points to explore
 
     Returns:
         List of path dicts: [{"nodes": [...], "cost": float, "distance": float, "safety_score": float}]
     """
-    def dijkstra(g, src, dst, ignore_nodes=None, ignore_edges=None):
-        """Modified Dijkstra that can exclude specific nodes/edges."""
+    nodes_map = graph.get("nodes", {})
+    edges_map = graph.get("edges", {})
+
+    if destination not in nodes_map or source not in nodes_map:
+        return []
+
+    dst_lat, dst_lng = nodes_map[destination]
+    cos_dst_lat = math.cos(math.radians(dst_lat))
+
+    def astar_search(src, dst, ignore_nodes=None, ignore_edges=None):
+        """Directed A* search with Euclidean heuristic and edge/node exclusions."""
         ignore_nodes = ignore_nodes or set()
         ignore_edges = ignore_edges or set()
 
+        heap = [(0.0, src)]
         dist = {src: 0.0}
         prev = {src: None}
-        heap = [(0.0, src)]
+        visited = set()
 
         while heap:
-            cost, u = heapq.heappop(heap)
+            f, u = heapq.heappop(heap)
             if u == dst:
-                # Reconstruct path
                 path = []
                 cur = dst
                 while cur is not None:
                     path.append(cur)
                     cur = prev[cur]
                 path.reverse()
-                return path, cost
+                return path, dist[dst]
 
-            if cost > dist.get(u, float("inf")):
+            if u in visited:
                 continue
+            visited.add(u)
 
-            for v, edge in g["edges"].get(u, {}).items():
+            u_dist = dist[u]
+            for v, edge in edges_map.get(u, {}).items():
                 if v in ignore_nodes:
                     continue
                 if (u, v) in ignore_edges or (v, u) in ignore_edges:
@@ -74,27 +88,32 @@ def yens_k_shortest(graph: dict, source, destination, k: int = 3) -> list:
 
                 safety_cost = (10 - edge["safety_score"]) / 10.0
                 edge_cost = edge["length"] * (1 + safety_cost)
-                new_cost = cost + edge_cost
+                new_cost = u_dist + edge_cost
 
                 if new_cost < dist.get(v, float("inf")):
                     dist[v] = new_cost
                     prev[v] = u
-                    heapq.heappush(heap, (new_cost, v))
+                    # A* heuristic to destination
+                    v_lat, v_lng = nodes_map[v]
+                    dlat = (dst_lat - v_lat) * 111.0
+                    dlng = (dst_lng - v_lng) * 111.0 * cos_dst_lat
+                    h = math.sqrt(dlat * dlat + dlng * dlng)
+                    heapq.heappush(heap, (new_cost + h, v))
 
-        return None, float("inf")  # No path found
+        return None, float("inf")
 
     # ── Phase 1: Find the first (best) path ──
-    first_path, first_cost = dijkstra(graph, source, destination)
+    first_path, first_cost = astar_search(source, destination)
     if not first_path:
         return []
 
     def path_to_info(path, cost):
         total_dist = sum(
-            graph["edges"].get(path[i], {}).get(path[i+1], {}).get("length", 0)
+            edges_map.get(path[i], {}).get(path[i+1], {}).get("length", 0)
             for i in range(len(path) - 1)
         )
         safety_scores = [
-            graph["edges"].get(path[i], {}).get(path[i+1], {}).get("safety_score", 5)
+            edges_map.get(path[i], {}).get(path[i+1], {}).get("safety_score", 5)
             for i in range(len(path) - 1)
         ]
         avg_safety = sum(safety_scores) / max(len(safety_scores), 1)
@@ -102,18 +121,38 @@ def yens_k_shortest(graph: dict, source, destination, k: int = 3) -> list:
 
     A = [path_to_info(first_path, first_cost)]  # Confirmed k-shortest paths
     B = []  # Candidate paths (heap)
+    seen_paths = {tuple(first_path)}
 
     for ki in range(1, k):
         prev_path = A[ki - 1]["nodes"]
+        path_len = len(prev_path) - 1
+        if path_len <= 0:
+            break
 
-        # ── Phase 2: Generate candidates by "spurring" from each spur node ──
-        for spur_idx in range(len(prev_path) - 1):
-            spur_node   = prev_path[spur_idx]
-            root_path   = prev_path[:spur_idx + 1]
-            # Recompute actual cost along root_path edges (fixes incorrect fractional estimate)
+        # Collect candidate spur indices where the road actually branches (degree > 2)
+        intersection_indices = [
+            i for i in range(path_len)
+            if len(edges_map.get(prev_path[i], {})) > 2
+        ]
+        if not intersection_indices:
+            intersection_indices = list(range(path_len))
+
+        # Sample up to max_spurs indices evenly across the route to ensure diverse corridors
+        if len(intersection_indices) > max_spurs:
+            step = len(intersection_indices) / max_spurs
+            spur_indices = [intersection_indices[int(s * step)] for s in range(max_spurs)]
+        else:
+            spur_indices = intersection_indices
+
+        # ── Phase 2: Generate candidates by spurring from filtered intersections ──
+        for spur_idx in spur_indices:
+            spur_node = prev_path[spur_idx]
+            root_path = prev_path[:spur_idx + 1]
+
+            # Recompute actual cost along root_path edges
             root_cost = 0.0
             for ri in range(len(root_path) - 1):
-                edge = graph["edges"].get(root_path[ri], {}).get(root_path[ri + 1], {})
+                edge = edges_map.get(root_path[ri], {}).get(root_path[ri + 1], {})
                 safety_cost = (10 - edge.get("safety_score", 5)) / 10.0
                 root_cost += edge.get("length", 0) * (1 + safety_cost)
 
@@ -128,25 +167,19 @@ def yens_k_shortest(graph: dict, source, destination, k: int = 3) -> list:
                     v = prev_nodes[spur_idx + 1]
                     ignore_edges.add((u, v))
 
-            spur_path, spur_cost = dijkstra(
-                graph, spur_node, destination,
+            spur_path, spur_cost = astar_search(
+                spur_node, destination,
                 ignore_nodes=ignore_nodes,
                 ignore_edges=ignore_edges,
             )
 
             if spur_path:
                 total_path = root_path[:-1] + spur_path
-                total_cost = root_cost + spur_cost
-
-                candidate = path_to_info(total_path, total_cost)
-
-                # Only add if not already in candidates or A
-                already_seen = any(
-                    c["nodes"] == total_path for c in B
-                ) or any(
-                    p["nodes"] == total_path for p in A
-                )
-                if not already_seen:
+                total_tuple = tuple(total_path)
+                if total_tuple not in seen_paths:
+                    seen_paths.add(total_tuple)
+                    total_cost = root_cost + spur_cost
+                    candidate = path_to_info(total_path, total_cost)
                     heapq.heappush(B, (total_cost, id(candidate), candidate))
 
         if not B:
@@ -295,19 +328,37 @@ def compute_dynamic_penalties(hazards: list, graph: dict, is_night: bool) -> dic
 #    edge weight adjustments for the routing engine.
 # ═══════════════════════════════════════════════════════════
 
+# ── TomTom Traffic In-Memory Cache (60s TTL) ─────────────────────────
+import time as _pytime
+_TOMTOM_TRAFFIC_CACHE = {}
+_TOMTOM_TRAFFIC_TIME = {}
+_TOMTOM_FLOW_CACHE = {}
+_TOMTOM_FLOW_TIME = {}
+_TOMTOM_CACHE_TTL = 60.0  # 60 seconds TTL
+
+_HTTPX_CLIENT = None
+
+def _get_httpx_client():
+    global _HTTPX_CLIENT
+    if _HTTPX_CLIENT is None or _HTTPX_CLIENT.is_closed:
+        _HTTPX_CLIENT = httpx.AsyncClient(timeout=4.0, limits=httpx.Limits(max_keepalive_connections=10, max_connections=20))
+    return _HTTPX_CLIENT
+
+
 async def fetch_tomtom_traffic(lat: float, lng: float, radius_meters: int = 5000) -> list:
     """
     Fetch live traffic incidents from TomTom Traffic API.
-
-    🔑 Requires TOMTOM_API_KEY in environment variables.
-    Get key: https://developer.tomtom.com → My Apps → Create App
-    Free tier: 2,500 requests/day
-
-    Returns list of traffic incidents near the given coordinates.
+    Cached for 60s per ~1km grid cell to optimize route calculation latency.
     """
     if TOMTOM_API_KEY == "YOUR_TOMTOM_API_KEY_HERE":
         print("⚠ TomTom API key not set — skipping traffic data")
         return []
+
+    cache_key = (round(lat, 2), round(lng, 2))
+    now = _pytime.time()
+    if cache_key in _TOMTOM_TRAFFIC_CACHE:
+        if (now - _TOMTOM_TRAFFIC_TIME.get(cache_key, 0)) < _TOMTOM_CACHE_TTL:
+            return _TOMTOM_TRAFFIC_CACHE[cache_key]
 
     url = (
         f"https://api.tomtom.com/traffic/services/5/incidentDetails"
@@ -319,11 +370,14 @@ async def fetch_tomtom_traffic(lat: float, lng: float, radius_meters: int = 5000
     )
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            data = res.json()
-            return data.get("incidents", [])
+        client = _get_httpx_client()
+        res = await client.get(url)
+        res.raise_for_status()
+        data = res.json()
+        incidents = data.get("incidents", [])
+        _TOMTOM_TRAFFIC_CACHE[cache_key] = incidents
+        _TOMTOM_TRAFFIC_TIME[cache_key] = now
+        return incidents
     except Exception as e:
         print(f"TomTom API error: {e}")
         return []
@@ -332,12 +386,16 @@ async def fetch_tomtom_traffic(lat: float, lng: float, radius_meters: int = 5000
 async def fetch_tomtom_flow(lat: float, lng: float) -> dict:
     """
     Fetch real-time traffic flow (speed vs free-flow speed).
-    Used to determine crowd/congestion level for safety scoring.
-
-    Returns: {"current_speed": float, "free_flow_speed": float, "congestion_level": 0-10}
+    Cached for 60s per ~1km grid cell.
     """
     if TOMTOM_API_KEY == "YOUR_TOMTOM_API_KEY_HERE":
         return {"current_speed": 30, "free_flow_speed": 50, "congestion_level": 4}
+
+    cache_key = (round(lat, 2), round(lng, 2))
+    now = _pytime.time()
+    if cache_key in _TOMTOM_FLOW_CACHE:
+        if (now - _TOMTOM_FLOW_TIME.get(cache_key, 0)) < _TOMTOM_CACHE_TTL:
+            return _TOMTOM_FLOW_CACHE[cache_key]
 
     url = (
         f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
@@ -345,26 +403,26 @@ async def fetch_tomtom_flow(lat: float, lng: float) -> dict:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            data = res.json().get("flowSegmentData", {})
+        client = _get_httpx_client()
+        res = await client.get(url)
+        res.raise_for_status()
+        data = res.json().get("flowSegmentData", {})
 
-            current   = data.get("currentSpeed", 30)
-            free_flow = data.get("freeFlowSpeed", 50)
+        current   = data.get("currentSpeed", 30)
+        free_flow = data.get("freeFlowSpeed", 50)
 
-            # Congestion: 0 = free flowing (many people), 10 = gridlock (isolated)
-            # For safety: moderate congestion = safer (people around)
-            # Very low traffic at night = dangerous (isolated)
-            ratio = current / max(free_flow, 1)
-            congestion_level = round((1 - ratio) * 10, 1)
+        ratio = current / max(free_flow, 1)
+        congestion_level = round((1 - ratio) * 10, 1)
 
-            return {
-                "current_speed": current,
-                "free_flow_speed": free_flow,
-                "congestion_level": congestion_level,
-                "crowd_safety_score": min(congestion_level * 0.6 + 3, 8),
-            }
+        result = {
+            "current_speed": current,
+            "free_flow_speed": free_flow,
+            "congestion_level": congestion_level,
+            "crowd_safety_score": min(congestion_level * 0.6 + 3, 8),
+        }
+        _TOMTOM_FLOW_CACHE[cache_key] = result
+        _TOMTOM_FLOW_TIME[cache_key] = now
+        return result
     except Exception as e:
         print(f"TomTom Flow API error: {e}")
         return {"current_speed": 30, "free_flow_speed": 50, "congestion_level": 4}

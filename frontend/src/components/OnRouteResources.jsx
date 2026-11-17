@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Zap, ShieldCheck, Heart, ChevronDown, ChevronUp, Phone, MapPin, Clock, Wifi, Loader } from "lucide-react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 // ── TomTom EV Charging Availability hook ──
 // Fetches real-time socket status via our backend proxy.

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { X, Navigation, CheckCircle2, AlertTriangle, LocateFixed } from "lucide-react";
+import { X, Navigation, CheckCircle2, AlertTriangle, LocateFixed, Compass, Shield } from "lucide-react";
+import { Geolocation } from "@capacitor/geolocation";
 
 // ── geometry helpers (path is [[lat,lng], ...]) ──
 const KM_LAT = 110.574;
@@ -55,75 +56,169 @@ export default function TripOverlay({ route, routeName, onPosition, onEnd }) {
   const cum = useMemo(() => buildPath(path), [route]);
   const total = cum[cum.length - 1] || 0;
 
-  const [pos, setPos] = useState(null);
+  // Initialize position at route start point so navigation view is immediate
+  const [pos, setPos] = useState(path[0] || null);
   const [demo, setDemo] = useState(false);
   const [gpsError, setGpsError] = useState(null);
   const simKm = useRef(0);
 
-  // Real GPS
+  // Initialize GPS (Capacitor Geolocation with native Android permission handling)
   useEffect(() => {
     if (demo) return;
-    if (!navigator.geolocation) { setGpsError("This device has no GPS."); return; }
-    setGpsError(null);
-    const id = navigator.geolocation.watchPosition(
-      (p) => setPos([p.coords.latitude, p.coords.longitude]),
-      (e) => setGpsError(e.message || "Can't get your location."),
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
-    );
-    return () => navigator.geolocation.clearWatch(id);
+    let isMounted = true;
+    let webWatchId = null;
+    let nativeWatchId = null;
+
+    async function startTracking() {
+      try {
+        let hasNativeCapacitor = false;
+        try {
+          const perm = await Geolocation.checkPermissions();
+          if (perm.location !== "granted") {
+            const req = await Geolocation.requestPermissions();
+            if (req.location !== "granted") {
+              if (isMounted) {
+                setGpsError("Location permission required for live GPS navigation. Tap 'Demo' below to simulate.");
+              }
+              return;
+            }
+          }
+          hasNativeCapacitor = true;
+        } catch (_) {
+          // Standard browser or plugin not available
+        }
+
+        if (hasNativeCapacitor) {
+          nativeWatchId = await Geolocation.watchPosition(
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 2000 },
+            (position, err) => {
+              if (!isMounted) return;
+              if (err) {
+                setGpsError(err.message || "Searching for GPS satellites…");
+                return;
+              }
+              if (position?.coords) {
+                setGpsError(null);
+                setPos([position.coords.latitude, position.coords.longitude]);
+              }
+            }
+          );
+        } else if (navigator.geolocation) {
+          webWatchId = navigator.geolocation.watchPosition(
+            (p) => {
+              if (!isMounted) return;
+              setGpsError(null);
+              setPos([p.coords.latitude, p.coords.longitude]);
+            },
+            (e) => {
+              if (!isMounted) return;
+              setGpsError(e.message || "Acquiring GPS fix… Tap 'Demo' to simulate.");
+            },
+            { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+          );
+        } else {
+          if (isMounted) setGpsError("This device has no GPS available.");
+        }
+      } catch (err) {
+        if (isMounted) setGpsError("GPS initialization error: " + (err.message || "Failed"));
+      }
+    }
+
+    startTracking();
+
+    return () => {
+      isMounted = false;
+      if (webWatchId !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(webWatchId);
+      }
+      if (nativeWatchId !== null) {
+        Geolocation.clearWatch({ id: nativeWatchId }).catch(() => {});
+      }
+    };
   }, [demo]);
 
-  // Demo mode: walk along the route
+  // Demo mode: smoothly walk along the calculated route
   useEffect(() => {
     if (!demo) return;
     simKm.current = 0;
     setGpsError(null);
     const id = setInterval(() => {
-      simKm.current = Math.min(total, simKm.current + 0.03);
+      simKm.current = Math.min(total, simKm.current + 0.035);
       setPos(pointAt(path, cum, simKm.current));
-    }, 800);
+    }, 700);
     return () => clearInterval(id);
-  }, [demo, route]);
+  }, [demo, route, total, path, cum]);
 
-  useEffect(() => { if (pos) onPosition?.(pos); }, [pos]);
+  useEffect(() => {
+    if (pos) onPosition?.(pos);
+  }, [pos, onPosition]);
+
+  const routeTotalKm = route?.distance_km != null ? Number(route.distance_km) : total;
+  const fullEta = Number(route?.eta_mins) || Math.max(1, Math.round((total / 5) * 60));
 
   const prog = pos && path.length > 1 ? progressOnPath(path, cum, pos) : null;
-  const remaining = prog ? Math.max(0, total - prog.along) : total;
+  const alongRatio = total > 0 && prog ? Math.min(1, Math.max(0, prog.along / total)) : 0;
+  const remainingDist = Math.max(0, routeTotalKm * (1 - alongRatio));
   const offRoute = prog ? prog.dist > OFF_ROUTE_KM : false;
-  const arrived = prog ? remaining <= ARRIVE_KM : false;
-  const fullEta = Number(route?.eta_mins) || Math.max(1, Math.round((total / 5) * 60));
-  const etaMin = total ? Math.max(1, Math.ceil(fullEta * (remaining / total))) : fullEta;
+  const arrived = prog ? (total - prog.along) <= ARRIVE_KM : false;
+  const etaMin = Math.max(1, Math.round(fullEta * (1 - alongRatio)));
   const arriveAt = new Date(Date.now() + etaMin * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  const displayDist = alongRatio === 0 && route?.distance_km != null
+    ? String(route.distance_km)
+    : remainingDist.toFixed(2);
 
   return (
     <>
+      {/* Top Banner: Guidance and route status */}
       <div className={`trip-top ${offRoute ? "warn" : arrived ? "done" : ""}`} role="status">
-        {arrived ? <CheckCircle2 size={20} /> : offRoute ? <AlertTriangle size={20} /> : <Navigation size={20} />}
-        <div>
-          <strong>{arrived ? "You've arrived" : offRoute ? "You're off the safe route" : `Navigating · ${routeName}`}</strong>
+        <div className="trip-top-icon">
+          {arrived ? <CheckCircle2 size={22} /> : offRoute ? <AlertTriangle size={22} /> : <Navigation size={22} />}
+        </div>
+        <div className="trip-top-content">
+          <strong>
+            {arrived ? "You've Arrived at Destination" : offRoute ? "You're off the safe corridor" : `Navigating · ${routeName}`}
+          </strong>
           <span>
-            {gpsError ? gpsError
-              : !pos ? "Waiting for GPS…"
-                : arrived ? "Stay safe. Trip complete."
-                  : offRoute ? "Head back to the highlighted route, or recalculate from the Directions tab."
-                    : "Following the safest path. SOS is always one tap away."}
+            {gpsError
+              ? gpsError
+              : !pos
+                ? "Waiting for GPS signal…"
+                : arrived
+                  ? "Trip complete. Stay safe!"
+                  : offRoute
+                    ? "Head back towards highlighted route."
+                    : "Patrolled safe route active. SOS is 1-tap away."}
           </span>
         </div>
       </div>
 
+      {/* Bottom Bar: ETA, Distance, End Trip and Demo controls */}
       <div className="trip-bar">
-        <button className="trip-end" onClick={onEnd}>
-          <X size={18} /> {arrived ? "Done" : "End"}
+        <button
+          className="trip-end"
+          onClick={onEnd}
+          aria-label="End Navigation"
+        >
+          <X size={18} />
+          <span>{arrived ? "Done" : "End"}</span>
         </button>
+
         {!arrived && (
           <div className="trip-stats">
-            <div className="big">{etaMin} min</div>
-            <div className="sub">{remaining.toFixed(1)} km · arrive {arriveAt}</div>
+            <div className="big">{etaMin} <span className="trip-min-label">min</span></div>
+            <div className="sub">{displayDist} km · ETA {arriveAt}</div>
           </div>
         )}
-        <button className={`trip-demo ${demo ? "on" : ""}`} onClick={() => setDemo(!demo)}
-          title="Simulate moving along the route (useful without GPS)">
-          <LocateFixed size={14} /> {demo ? "Demo on" : "Demo"}
+
+        <button
+          className={`trip-demo ${demo ? "on" : ""}`}
+          onClick={() => setDemo(!demo)}
+          title="Simulate moving along route (useful for testing)"
+          aria-pressed={demo}
+        >
+          <LocateFixed size={15} />
+          <span>{demo ? "Simulating" : "Demo"}</span>
         </button>
       </div>
     </>

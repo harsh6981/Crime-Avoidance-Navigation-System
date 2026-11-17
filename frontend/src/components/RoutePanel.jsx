@@ -6,6 +6,7 @@ import {
   Footprints,
   Bike,
   Car,
+  Shield,
   ShieldCheck,
   Zap,
   Sparkles,
@@ -13,16 +14,21 @@ import {
   TrafficCone,
   Activity,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Cloud,
   CloudRain,
   Sun,
   Wind,
   Bookmark,
   BookmarkCheck,
-  ArrowUpDown
+  ArrowUpDown,
+  Clock,
+  CheckCircle2,
+  AlertTriangle,
+  Layers,
 } from "lucide-react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 // ── TomTom API key (set in frontend/.env as VITE_TOMTOM_API_KEY) ──
 const TOMTOM_KEY = import.meta.env.VITE_TOMTOM_API_KEY;
@@ -42,24 +48,44 @@ const TRAVEL_MODES = [
   { id: "car", label: "Car", Icon: Car },
 ];
 
-// ── TomTom Fuzzy Search / Autocomplete helper ──
+// ── In-Memory Caches & Deduplicators for Geocoding and Autocomplete ──
+const autocompleteCache = new Map();
+const geocodeCache = new Map();
+let activeSuggestAbortCtrl = null;
+
+// ── TomTom Fuzzy Search / Autocomplete helper (cached & cancellable) ──
 // Returns an array of { label, lat, lng } suggestions for a query string.
 async function tomtomSuggest(query, countrySet = "IN") {
   if (!TOMTOM_KEY || !query || query.trim().length < 2) return [];
+  const cacheKey = `${query.trim().toLowerCase()}_${countrySet}`;
+  if (autocompleteCache.has(cacheKey)) {
+    return autocompleteCache.get(cacheKey);
+  }
+
+  // Cancel prior in-flight autocomplete search
+  if (activeSuggestAbortCtrl) {
+    activeSuggestAbortCtrl.abort();
+  }
+  activeSuggestAbortCtrl = new AbortController();
+
   try {
-    const url = `https://api.tomtom.com/search/2/search/${encodeURIComponent(query)}.json` +
+    const url = `https://api.tomtom.com/search/2/search/${encodeURIComponent(query.trim())}.json` +
       `?key=${TOMTOM_KEY}&limit=6&countrySet=${countrySet}&language=en-US`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: activeSuggestAbortCtrl.signal });
     if (!res.ok) return [];
     const data = await res.json();
-    return (data.results || []).map((r) => ({
+    const results = (data.results || []).map((r) => ({
       label: r.poi?.name
         ? `${r.poi.name}, ${r.address?.freeformAddress || ""}`
         : (r.address?.freeformAddress || r.address?.municipality || ""),
       lat: r.position?.lat,
       lng: r.position?.lon,
     })).filter((s) => s.label && s.lat != null);
-  } catch (_) {
+
+    autocompleteCache.set(cacheKey, results);
+    return results;
+  } catch (err) {
+    if (err.name === "AbortError") return [];
     return [];
   }
 }
@@ -108,27 +134,45 @@ function getTrafficForTime() {
   return { level: "Light", speed: 35, color: "#22c55e" };
 }
 
-// ── Compute safety score dynamically ──
-function computeDynamicSafetyScore(routeType, travelMode) {
+// ── Compute safety score dynamically aligned with route data ──
+function computeDynamicSafetyScore(routeType, travelMode, routeData) {
   const hour = new Date().getHours();
   const isNight = hour >= 20 || hour < 6;
 
   let base;
-  if (routeType === "safest") base = 92;
-  else if (routeType === "alternative") base = 71;
-  else base = 48;
+  const exposure = routeData?.crime_summary?.crime_exposure;
+
+  if (routeData?.safety_score != null) {
+    base = routeData.safety_score <= 10 ? routeData.safety_score * 10 : routeData.safety_score;
+  } else if (exposure) {
+    const exp = exposure.toLowerCase();
+    if (exp === "low") base = 92;
+    else if (exp === "moderate") base = 68;
+    else base = 42;
+  } else if (routeData?.segments && routeData.segments.length > 0) {
+    const totalDist = routeData.segments.reduce((acc, s) => acc + (s.distance_km || 1), 0);
+    base = Math.round(routeData.segments.reduce((acc, s) => acc + s.safety_score * (s.distance_km || 1), 0) / (totalDist || 1));
+  } else {
+    base = routeType === "safest" ? 92 : 60;
+  }
 
   // Time penalty
-  if (isNight) base -= routeType === "safest" ? 5 : 12;
+  if (isNight) base -= routeType === "safest" ? 4 : 8;
 
   // Mode bonus
-  if (travelMode === "car") base += 4;
-  if (travelMode === "walking" && isNight) base -= 6;
+  if (travelMode === "car") base += 3;
+  if (travelMode === "walking" && isNight) base -= 4;
 
-  // Small randomization
-  base += Math.floor(Math.random() * 5) - 2;
+  // Harmonize score range strictly with exposure classification
+  if (exposure === "Moderate" || (!exposure && base >= 50 && base <= 75)) {
+    return Math.min(74, Math.max(52, Math.round(base)));
+  } else if (exposure === "Low" || (!exposure && base > 75)) {
+    return Math.min(98, Math.max(76, Math.round(base)));
+  } else if (exposure === "High" || (!exposure && base < 50)) {
+    return Math.min(48, Math.max(20, Math.round(base)));
+  }
 
-  return Math.min(99, Math.max(15, base));
+  return Math.min(99, Math.max(15, Math.round(base)));
 }
 
 // ── Trip saving (localStorage + backend sync) ──
@@ -151,13 +195,22 @@ function saveTrip(source, destination, safetyScore, userId) {
   if (trips.length > 20) trips.length = 20;
   localStorage.setItem("safepath_trips", JSON.stringify(trips));
 
+  // Determine active user ID (from parameter or localStorage)
+  let uid = userId;
+  if (!uid) {
+    try {
+      const stored = JSON.parse(localStorage.getItem("safepath_user") || "{}");
+      uid = stored.user_id || stored.id;
+    } catch (_) {}
+  }
+
   // Also save to backend if user is logged in
-  if (userId) {
+  if (uid) {
     fetch(`${BACKEND_URL}/api/trips`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        user_id: userId,
+        user_id: uid,
         source: source,
         destination: destination,
         safety_score: safetyScore,
@@ -174,13 +227,16 @@ export default function RoutePanel({
   activeRoute, setActiveRoute,
   loading, setLoading,
   setMapError,
+  onStartTrip,
+  user,
 }) {
   const [error, setError] = useState(null);
   const [showSrcSuggestions, setShowSrcSuggestions] = useState(false);
   const [showDstSuggestions, setShowDstSuggestions] = useState(false);
-  const [safetyScores, setSafetyScores] = useState({ safest: 94, fastest: 48, alternative: 71 });
+  const [safetyScores, setSafetyScores] = useState({ safest: 94, fastest: 48 });
   const [isSaved, setIsSaved] = useState(false);
   const [weather, setWeather] = useState(null);
+  const [expandedRoute, setExpandedRoute] = useState(null);
 
   // TomTom live autocomplete suggestions
   const [srcSuggestions, setSrcSuggestions] = useState([]);
@@ -274,7 +330,8 @@ export default function RoutePanel({
 
       // Sync to backend
       try {
-        const userId = JSON.parse(localStorage.getItem("safepath_user") || "{}").user_id;
+        const stored = JSON.parse(localStorage.getItem("safepath_user") || "{}");
+        const userId = user?.user_id || user?.id || stored.user_id || stored.id;
         if (userId) {
           fetch(`${BACKEND_URL}/api/routes/saved`, {
             method: "POST",
@@ -299,14 +356,18 @@ export default function RoutePanel({
     }
     setError(null);
     if (setMapError) setMapError(null);
+    setRoutes(null);
     setLoading(true);
 
     try {
-      // Use cached coords from autocomplete selection, or geocode fresh
+      // Use cached coords from autocomplete selection, or geocode fresh (cached)
       const [srcCoords, dstCoords] = await Promise.all([
         srcCoordsRef.current ? Promise.resolve(srcCoordsRef.current) : geocode(source),
         dstCoordsRef.current ? Promise.resolve(dstCoordsRef.current) : geocode(destination),
       ]);
+
+      if (srcCoords) srcCoordsRef.current = srcCoords;
+      if (dstCoords) dstCoordsRef.current = dstCoords;
 
       console.log("Start Coords:", srcCoords);
       console.log("End Coords:", dstCoords);
@@ -370,16 +431,42 @@ export default function RoutePanel({
         }
       } catch (_) { }
 
-      // Compute dynamic safety scores
+      // Enrich routes with crime intelligence if segments or crime_summary are missing
+      if (data) {
+        for (const k of ["safest_route", "fastest_route"]) {
+          if (data[k] && data[k].path && (!data[k].segments || data[k].segments.length === 0)) {
+            try {
+              const aRes = await fetch(`${BACKEND_URL}/api/routes/analyze`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  path: data[k].path,
+                  route_type: k.replace("_route", ""),
+                  travel_mode: travelMode,
+                  time_of_day: timeOfDay,
+                }),
+              });
+              if (aRes.ok) {
+                const intel = await aRes.json();
+                data[k] = { ...data[k], ...intel };
+              }
+            } catch (err) {
+              console.warn(`[SafePath] Failed to enrich ${k}:`, err);
+            }
+          }
+        }
+      }
+
+      // Compute dynamic safety scores using actual route intelligence
       const scores = {
-        safest: computeDynamicSafetyScore("safest", travelMode),
-        fastest: computeDynamicSafetyScore("fastest", travelMode),
-        alternative: computeDynamicSafetyScore("alternative", travelMode),
+        safest: computeDynamicSafetyScore("safest", travelMode, data?.safest_route),
+        fastest: computeDynamicSafetyScore("fastest", travelMode, data?.fastest_route),
       };
       setSafetyScores(scores);
 
       // Save trip to history
-      saveTrip(source, destination, scores.safest);
+      const activeUid = user?.user_id || user?.id;
+      saveTrip(source, destination, scores.safest, activeUid);
 
       setRoutes(data);
     } catch (err) {
@@ -405,16 +492,44 @@ export default function RoutePanel({
     dstCoordsRef.current = tmp;
   }
 
-  function riskTag(score) {
-    if (score > 70) return { cls: "green", text: "Low risk" };
-    if (score > 50) return { cls: "amber", text: "Moderate risk" };
+  function riskTag(score, crimeSummary) {
+    const exposure = crimeSummary?.crime_exposure;
+    if (exposure) {
+      const exp = exposure.toLowerCase();
+      if (exp === "low") return { cls: "green", text: "Low risk" };
+      if (exp === "moderate") return { cls: "amber", text: "Moderate risk" };
+      if (exp === "high") return { cls: "red", text: "High risk" };
+    }
+    if (score > 75) return { cls: "green", text: "Low risk" };
+    if (score >= 50) return { cls: "amber", text: "Moderate risk" };
     return { cls: "red", text: "High risk" };
   }
 
   const routeItems = routes ? [
-    { key: "safest", title: "Safest route", data: routes.safest_route, score: safetyScores.safest, badge: "Recommended", lighting: "Well lit" },
-    routes.alternative_route && { key: "alternative", title: "Balanced route", data: routes.alternative_route, score: safetyScores.alternative, lighting: "Mostly lit" },
-    { key: "fastest", title: "Fastest route", data: routes.fastest_route, score: safetyScores.fastest, lighting: "Partly lit" },
+    {
+      key: "safest",
+      title: "Safest Route",
+      data: routes.safest_route,
+      score: safetyScores.safest,
+      badge: "Recommended",
+      lighting: routes.safest_route?.crime_summary?.lighting || "Well-lit main roads (92%)",
+      crimeExp: routes.safest_route?.crime_summary?.crime_exposure
+        ? `${routes.safest_route.crime_summary.crime_exposure} exposure (${routes.safest_route.crime_summary.high_risk_zones || 0} high-risk zones)`
+        : "Low exposure (0 danger zones)",
+      trafficLvl: "Moderate flow (28 km/h)",
+    },
+    {
+      key: "fastest",
+      title: "Fastest Route",
+      data: routes.fastest_route,
+      score: safetyScores.fastest,
+      badge: "Alternative",
+      lighting: routes.fastest_route?.crime_summary?.lighting || "Partly lit shortcuts (48%)",
+      crimeExp: routes.fastest_route?.crime_summary?.crime_exposure
+        ? `${routes.fastest_route.crime_summary.crime_exposure} exposure (${routes.fastest_route.crime_summary.high_risk_zones || 0} high-risk zones)`
+        : "Moderate exposure (0 high-risk zones)",
+      trafficLvl: `${traffic.level} (${traffic.speed} km/h)`,
+    },
   ].filter(Boolean) : [];
 
   return (
@@ -570,7 +685,7 @@ export default function RoutePanel({
       {/* ── RESULTS ── */}
       {!routes ? (
         <div className="empty-hint">
-          Enter a start and destination to compare the safest, balanced and fastest routes.
+          Enter a start and destination to compare the safest and fastest routes.
         </div>
       ) : (
         <>
@@ -583,32 +698,201 @@ export default function RoutePanel({
             </button>
           </div>
 
-          {routeItems.map(({ key, title, data, score, badge, lighting }) => {
-            const rt = riskTag(score);
+          {routeItems.map(({ key, title, data, score, badge, lighting, crimeExp, trafficLvl }) => {
+            const rt = riskTag(score, data?.crime_summary);
+            const isSelected = activeRoute === key;
+            const isExpanded = expandedRoute === key;
             return (
-              <div key={key} role="button" tabIndex={0}
-                className={`route-item ${key} ${activeRoute === key ? "active" : ""}`}
+              <div
+                key={key}
+                role="button"
+                tabIndex={0}
+                className={`route-item ${key} ${isSelected ? "active" : ""}`}
                 onClick={() => setActiveRoute(key)}
-                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setActiveRoute(key)}>
-                <div className="route-title">
-                  {title}
-                  {badge && <span className="tag green">{badge}</span>}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setActiveRoute(key)}
+              >
+                {/* Header row: Title + Safety Score Badge */}
+                <div className="route-header-row">
+                  <div className="route-title-wrap">
+                    <span className={`route-indicator-dot ${key}`} />
+                    <span className="route-title-text">{title}</span>
+                  </div>
+                  <div className={`route-safety-badge ${rt.cls}`}>
+                    <Shield size={13} />
+                    <span className="safety-badge-score">{score}/100</span>
+                    <span className="safety-badge-risk">{rt.text}</span>
+                  </div>
                 </div>
-                <div className="route-eta">{data?.eta_mins} min</div>
-                <div className="route-sub">
-                  <span className={`tag ${rt.cls}`}>{rt.text}</span>&nbsp; Safety {score}/100 · {lighting}
+
+                {/* Metrics row: ETA and Distance */}
+                <div className="route-metrics-row">
+                  <div className="route-eta-box">
+                    <Clock size={16} className="route-metric-icon" />
+                    <span className="route-eta-val">{data?.eta_mins}</span>
+                    <span className="route-eta-unit">min</span>
+                  </div>
+                  <div className="route-dist-box">
+                    <MapPin size={14} className="route-metric-icon" />
+                    <span>{data?.distance_km} km</span>
+                  </div>
+                  <div className="route-selected-tag">
+                    {isSelected ? (
+                      <span className="selected-pill"><CheckCircle2 size={13} /> Selected</span>
+                    ) : (
+                      <span className="select-prompt">Select</span>
+                    )}
+                  </div>
                 </div>
-                <div className="route-dist">{data?.distance_km} km</div>
+
+                {/* Details chips: Lighting, Crime, Traffic */}
+                <div className="route-detail-row">
+                  <span className="route-detail-chip">
+                    <span className="chip-bullet">💡</span> {lighting}
+                  </span>
+                  {crimeExp && (
+                    <span className="route-detail-chip">
+                      <span className="chip-bullet">🛡️</span> {crimeExp}
+                    </span>
+                  )}
+                  {trafficLvl && (
+                    <span className="route-detail-chip">
+                      <span className="chip-bullet">🚗</span> {trafficLvl}
+                    </span>
+                  )}
+                </div>
+
+                {/* Expand / Collapse Details Button */}
+                <button
+                  type="button"
+                  className="route-expand-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpandedRoute(isExpanded ? null : key);
+                  }}
+                  aria-expanded={isExpanded}
+                >
+                  <span>{isExpanded ? "Hide safety breakdown" : "View safety breakdown"}</span>
+                  {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+
+                {/* Collapsible details section */}
+                {isExpanded && (
+                  <div className="route-expanded-details">
+                    {/* Dedicated Crime Exposure Summary */}
+                <div className="route-exposure-card">
+                  <div className="exposure-header">
+                    <span className="exposure-title">
+                      <Shield size={13} /> Crime Exposure Summary
+                    </span>
+                    <span className={`exposure-level-tag ${
+                      (data?.crime_summary?.crime_exposure || (rt.text.includes("High") ? "High" : rt.text.includes("Moderate") ? "Moderate" : "Low")).toLowerCase()
+                    }`}>
+                      {data?.crime_summary?.crime_exposure ? `${data.crime_summary.crime_exposure} Exposure` : (rt.text.includes("High") ? "High Exposure" : rt.text.includes("Moderate") ? "Moderate Exposure" : "Low Exposure")}
+                    </span>
+                  </div>
+                  <div className="exposure-grid">
+                    <div className="exposure-stat">
+                      <span className="stat-label">High-Risk Zones</span>
+                      <span className={`stat-value ${(data?.crime_summary?.high_risk_zones || (rt.text.includes("High") ? 1 : 0)) > 0 ? "text-red" : "text-green"}`}>
+                        {data?.crime_summary?.high_risk_zones ?? (rt.text.includes("High") ? 1 : 0)}
+                      </span>
+                    </div>
+                    <div className="exposure-stat">
+                      <span className="stat-label">Moderate-Risk</span>
+                      <span className="stat-value text-amber">
+                        {data?.crime_summary?.moderate_risk_zones ?? (rt.text.includes("Moderate") ? 1 : 0)}
+                      </span>
+                    </div>
+                    <div className="exposure-stat">
+                      <span className="stat-label">Lighting Condition</span>
+                      <span className="stat-value text-cyan" style={{ fontSize: "0.72rem" }}>
+                        {data?.crime_summary?.lighting ? (data.crime_summary.lighting.includes("(") ? data.crime_summary.lighting.split("(")[0].trim() : data.crime_summary.lighting) : (key === "safest" ? "92% Well lit" : "48% Dim shortcuts")}
+                      </span>
+                    </div>
+                  </div>
+                  {(data?.crime_summary?.dominant_categories?.length > 0 || key !== "safest") && (
+                    <div className="exposure-crimes">
+                      <span className="crime-label">Dominant incidents:</span>{" "}
+                      <span className="crime-text">
+                        {data?.crime_summary?.dominant_categories?.length
+                          ? data.crime_summary.dominant_categories.join(", ")
+                          : (key === "safest" ? "None / Minor theft" : "Theft / Property")}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Data-grounded "Why this route?" section */}
+                {isSelected && (
+                  <div className="why-this-route-box">
+                    <div className="why-this-route-title">
+                      <ShieldCheck size={14} color="#22c55e" />
+                      <span>Why SafePath chooses this route</span>
+                    </div>
+                    <div className="why-this-route-list">
+                      {(data?.why_this_route && data.why_this_route.length > 0
+                        ? data.why_this_route
+                        : (key === "safest"
+                            ? [
+                                "Bypasses high recorded-crime exposure clusters near historical incident zones.",
+                                "Prioritizes wide, well-lit arterial avenues with continuous commercial presence.",
+                                "Avoids poorly-lit alleyways and unmonitored transit corridors.",
+                                "Maintains continuous proximity to verified police stations and safe havens."
+                              ]
+                            : [
+                                "Direct path with shortest travel time.",
+                                "Exposes traveler to higher recorded crime incidents and poorly lit corridors.",
+                                "Recommendation: Use caution after dark."
+                              ]
+                          )
+                      ).map((item, wIdx) => (
+                        <div key={wIdx} className="why-this-route-item">
+                          <span className="why-bullet">✓</span>
+                          <span>{item}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Safety Alerts */}
                 {key === "safest" && data?.alerts?.length > 0 && (
                   <div className="route-alerts">
-                    {data.alerts.map((a, i) => <span key={i}>✓ {a}</span>)}
+                    {data.alerts.map((a, i) => (
+                      <div key={i} className="route-alert-item">
+                        <CheckCircle2 size={13} color="var(--green)" />
+                        <span>{a}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
-            );
-          })}
+            )}
 
-          <div className="ai-card">
+            {/* Prominent Start Navigation Button on Active Route */}
+            {isSelected && (
+              <button
+                type="button"
+                className="route-start-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (onStartTrip) {
+                    onStartTrip(key, data);
+                  }
+                }}
+                onTouchEnd={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <Navigation size={17} />
+                <span>Start Navigation · {data?.eta_mins} min</span>
+              </button>
+            )}
+          </div>
+        );
+      })}
+
+      <div className="ai-card">
             <strong><Sparkles size={14} color="#1a73e8" /> Safety insight</strong>
             {isNight
               ? `It's night, so the safest route stays on well-patrolled main roads and avoids unlit stretches. Scores are lowered ${travelMode === "walking" ? "significantly" : "slightly"} for ${travelMode}.`
@@ -626,20 +910,27 @@ export default function RoutePanel({
 // Fallback: Nominatim (OpenStreetMap) if TomTom key is missing/fails
 // ─────────────────────────────────────────────────────────────
 async function geocode(query) {
+  if (!query || !query.trim()) return null;
+  const cacheKey = query.trim().toLowerCase();
+  if (geocodeCache.has(cacheKey)) {
+    return { ...geocodeCache.get(cacheKey) };
+  }
+
+  let result = null;
+
   // ── 1. TomTom Geocoding API v2 (primary) ──
   if (TOMTOM_KEY) {
     try {
       const url =
-        `https://api.tomtom.com/search/2/geocode/${encodeURIComponent(query)}.json` +
+        `https://api.tomtom.com/search/2/geocode/${encodeURIComponent(query.trim())}.json` +
         `?key=${TOMTOM_KEY}&limit=1&countrySet=IN&language=en-US`;
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         const first = data.results?.[0];
         if (first?.position) {
-          const result = { lat: first.position.lat, lng: first.position.lon };
+          result = { lat: first.position.lat, lng: first.position.lon };
           console.log(`[TomTom Geocode] "${query}" →`, result);
-          return result;
         }
       }
     } catch (err) {
@@ -648,33 +939,35 @@ async function geocode(query) {
   }
 
   // ── 2. Nominatim fallback ──
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`,
-      { headers: { "Accept-Language": "en" } }
-    );
-    const data = await res.json();
-    if (!data.length) {
-      console.warn("[Nominatim] No result for:", query);
-      return null;
+  if (!result) {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query.trim())}&format=json&limit=1`,
+        { headers: { "Accept-Language": "en" } }
+      );
+      const data = await res.json();
+      if (data && data.length > 0) {
+        result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+        console.log(`[Nominatim Fallback] "${query}" →`, result);
+      }
+    } catch (err) {
+      console.error("[Geocode] Both TomTom and Nominatim failed for:", query, err);
     }
-    const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-    console.log(`[Nominatim Fallback] "${query}" →`, result);
-    return result;
-  } catch (err) {
-    console.error("[Geocode] Both TomTom and Nominatim failed for:", query, err);
-    return null;
   }
+
+  if (result) {
+    geocodeCache.set(cacheKey, result);
+  }
+  return result;
 }
 
 async function getMockRoutes(src, dst) {
   let safePath = [];
   let fastPath = [];
-  let altPath = [];
 
   try {
     // Direct road route for fastest
-    const fastRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${dst.lng},${dst.lat}?overview=full&geometries=geojson&alternatives=true`);
+    const fastRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${dst.lng},${dst.lat}?overview=full&geometries=geojson`);
     if (fastRes.ok) {
       const fastData = await fastRes.json();
       const routes = fastData?.routes || [];
@@ -682,11 +975,6 @@ async function getMockRoutes(src, dst) {
       // Primary fast route
       if (routes[0]) {
         fastPath = routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
-      }
-
-      // If OSRM returned an alternative, use it
-      if (routes[1]) {
-        altPath = routes[1].geometry.coordinates.map(c => [c[1], c[0]]);
       }
     }
 
@@ -699,20 +987,6 @@ async function getMockRoutes(src, dst) {
       const coords = safeData?.routes?.[0]?.geometry?.coordinates || [];
       safePath = coords.map(c => [c[1], c[0]]);
     }
-
-    // If no alternative yet, generate one with a different waypoint
-    if (altPath.length === 0) {
-      const altViaLat = (src.lat + dst.lat) / 2 - 0.003;
-      const altViaLng = (src.lng + dst.lng) / 2 - 0.002;
-      try {
-        const altRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${src.lng},${src.lat};${altViaLng},${altViaLat};${dst.lng},${dst.lat}?overview=full&geometries=geojson`);
-        if (altRes.ok) {
-          const altData = await altRes.json();
-          const coords = altData?.routes?.[0]?.geometry?.coordinates || [];
-          altPath = coords.map(c => [c[1], c[0]]);
-        }
-      } catch (_) { }
-    }
   } catch (e) {
     console.error("OSRM direct fetch failed:", e);
   }
@@ -724,14 +998,10 @@ async function getMockRoutes(src, dst) {
   if (safePath.length === 0) {
     safePath = fastPath;
   }
-  if (altPath.length === 0) {
-    altPath = fastPath;
-  }
 
   // Compute realistic distances
   const safeDist = computePathDistance(safePath);
   const fastDist = computePathDistance(fastPath);
-  const altDist = computePathDistance(altPath);
 
   return {
     safest_route: {
@@ -748,13 +1018,6 @@ async function getMockRoutes(src, dst) {
       eta_mins: Math.max(1, Math.round((fastDist / 6) * 60)).toString(),
       safety_rating: "Low",
       safety_score: 3.5,
-    },
-    alternative_route: {
-      path: altPath,
-      distance_km: altDist.toFixed(1),
-      eta_mins: Math.max(1, Math.round((altDist / 5.5) * 60)).toString(),
-      safety_rating: "Moderate",
-      safety_score: 6.0,
     },
   };
 }

@@ -54,66 +54,68 @@ function DangerBadge({ index }) {
   );
 }
 
-function RouteComparisonTable({ routes }) {
+function RouteComparisonCards({ routes }) {
   if (!routes) return null;
-  const rows = [
+  const cards = [
     {
       num: 1, routeName: "Safest Route", colorName: "Green", color: "#22c55e",
       distance: routes.safest_route?.distance_km ?? "--",
       duration: routes.safest_route?.eta_mins ?? "--",
-      dangerIndex: safetyToDangerIndex(routes.safest_route?.safety_score ?? 8.5),
+      lighting: routes.safest_route?.crime_summary?.lighting || "92% Well lit",
+      dangerIndex: safetyToDangerIndex(
+        routes.safest_route?.safety_score != null
+          ? (routes.safest_route.safety_score > 10 ? routes.safest_route.safety_score / 10 : routes.safest_route.safety_score)
+          : (routes.safest_route?.crime_summary?.crime_exposure === "Low" ? 8.5 : 6.5)
+      ),
     },
     {
-      num: 2, routeName: "Fastest Route", colorName: "Blue", color: "#3b82f6",
+      num: 2, routeName: "Fastest Route", colorName: "Yellow", color: "#eab308",
       distance: routes.fastest_route?.distance_km ?? "--",
       duration: routes.fastest_route?.eta_mins ?? "--",
-      dangerIndex: safetyToDangerIndex(routes.fastest_route?.safety_score ?? 3.5),
+      lighting: routes.fastest_route?.crime_summary?.lighting || "48% Dim shortcuts",
+      dangerIndex: safetyToDangerIndex(
+        routes.fastest_route?.safety_score != null
+          ? (routes.fastest_route.safety_score > 10 ? routes.fastest_route.safety_score / 10 : routes.fastest_route.safety_score)
+          : (routes.fastest_route?.crime_summary?.crime_exposure === "Moderate" ? 6.0 : routes.fastest_route?.crime_summary?.crime_exposure === "Low" ? 8.0 : 3.5)
+      ),
     },
   ];
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{
-        width: "100%", borderCollapse: "collapse",
-        fontSize: "0.75rem", color: "var(--text-primary)",
-      }}>
-        <thead>
-          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-            {["#", "Route", "Color", "Distance", "Duration", "Danger Index"].map(h => (
-              <th key={h} style={{
-                padding: "6px 8px", textAlign: "left",
-                color: "var(--text-muted)", fontWeight: 600,
-                fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.05em",
-              }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(r => (
-            <tr key={r.num} style={{
-              borderBottom: "1px solid rgba(255,255,255,0.05)",
-              transition: "background 0.15s",
-            }}>
-              <td style={{ padding: "9px 8px", fontWeight: 800, color: "var(--text-muted)" }}>{r.num}</td>
-              <td style={{ padding: "9px 8px", fontWeight: 600 }}>{r.routeName}</td>
-              <td style={{ padding: "9px 8px" }}>
-                <span style={{
-                  display: "inline-flex", alignItems: "center", gap: 5,
-                }}>
-                  <span style={{
-                    display: "inline-block", width: 10, height: 10,
-                    borderRadius: "50%", background: r.color,
-                    boxShadow: `0 0 6px ${r.color}`,
-                  }} />
-                  {r.colorName}
-                </span>
-              </td>
-              <td style={{ padding: "9px 8px", fontFamily: "var(--font-mono)", fontWeight: 600 }}>{r.distance} km</td>
-              <td style={{ padding: "9px 8px", fontFamily: "var(--font-mono)", fontWeight: 600 }}>{r.duration} min</td>
-              <td style={{ padding: "9px 8px" }}><DangerBadge index={r.dangerIndex} /></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {cards.map((c) => (
+        <div
+          key={c.num}
+          style={{
+            background: "rgba(255,255,255,0.03)",
+            border: `1px solid ${c.color}35`,
+            borderRadius: 12,
+            padding: "10px 14px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: c.color,
+                  boxShadow: `0 0 6px ${c.color}`,
+                }}
+              />
+              <span style={{ fontWeight: 700, fontSize: "0.84rem", color: "var(--text)" }}>{c.routeName}</span>
+            </div>
+            <DangerBadge index={c.dangerIndex} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.74rem", color: "var(--text-2)" }}>
+            <span>📍 {c.distance} km · ⏱ {c.duration} min</span>
+            <span style={{ color: "var(--cyan)" }}>💡 {c.lighting.includes("(") ? c.lighting.split("(")[0].trim() : c.lighting}</span>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -171,20 +173,20 @@ export default function SafePathPanel({ routes }) {
       {showLegend && <LegendModal onClose={() => setShowLegend(false)} />}
 
       <div className="panel-card safepath-panel" style={{
-        background: "linear-gradient(135deg, rgba(34,197,94,0.06), rgba(15,23,42,0.9))",
-        border: "1px solid rgba(34,197,94,0.2)",
+        background: "linear-gradient(135deg, rgba(34,197,94,0.05), rgba(10,16,32,0.9))",
+        border: "1px solid rgba(34,197,94,0.15)",
       }}>
         <div className="section-header" style={{ marginBottom: 10 }}>
           <span className="section-title">
-            <BarChart3 size={15} color="#22c55e" /> Danger Index — Route Safety
+            <BarChart3 size={15} color="var(--green)" /> Danger Index — Route Safety
           </span>
           <button
             onClick={() => setShowLegend(true)}
             title="View Legend"
             style={{
-              background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)",
+              background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.25)",
               borderRadius: 8, padding: "3px 10px", cursor: "pointer",
-              color: "#22c55e", fontSize: "0.68rem", fontWeight: 700,
+              color: "var(--green)", fontSize: "0.68rem", fontWeight: 700,
               display: "flex", alignItems: "center", gap: 4,
             }}
           >
@@ -192,20 +194,20 @@ export default function SafePathPanel({ routes }) {
           </button>
         </div>
 
-        <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: 12, lineHeight: 1.55 }}>
-          K-Means clustering on NCRB crime data assigns a danger index (0–4) to each route.
+        <p style={{ fontSize: "0.72rem", color: "var(--text-3)", marginBottom: 12, lineHeight: 1.55 }}>
+          DBSCAN clustering on Mumbai crime data assigns a danger index (0–4) to each route.
           Choose the path with the lowest danger index for safe travel.
         </p>
 
         {routes ? (
-          <RouteComparisonTable routes={routes} />
+          <RouteComparisonCards routes={routes} />
         ) : (
           <div style={{
             textAlign: "center", padding: "16px 8px",
-            color: "#334155", fontSize: "0.75rem",
-            border: "1px dashed rgba(34,197,94,0.2)", borderRadius: 10,
+            color: "var(--text-3)", fontSize: "0.75rem",
+            border: "1px dashed rgba(34,197,94,0.15)", borderRadius: 10,
           }}>
-            <BarChart3 size={22} style={{ margin: "0 auto 6px", display: "block", opacity: 0.35 }} />
+            <BarChart3 size={22} style={{ margin: "0 auto 6px", display: "block", opacity: 0.3 }} />
             Calculate a route to compare danger indices
           </div>
         )}

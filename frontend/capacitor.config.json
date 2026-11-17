@@ -1,0 +1,9 @@
+{
+  "appId": "com.safepath.mobile",
+  "appName": "SafePath",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "http"
+  }
+}

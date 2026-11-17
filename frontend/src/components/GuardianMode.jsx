@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 /**
  * GuardianMode — Background Safety Monitor
@@ -134,7 +133,7 @@ export default function GuardianMode({ user, activeRoute, onAlert }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: user?.id || "anonymous",
+          user_id: user?.user_id || user?.id || "anonymous",
           current_location: { lat, lng },
           trigger: "guardian_auto",
         }),
@@ -231,19 +230,19 @@ const styles = {
   header: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   headerIcon: { fontSize: 15 },
   headerTitle: { fontWeight: 600, fontSize: 13, flex: 1 },
-  toggle: { width: 38, height: 22, borderRadius: 11, cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 },
-  toggleThumb: { position: "absolute", top: 2, width: 18, height: 18, borderRadius: 9, background: "#fff", transition: "transform 0.2s" },
+  toggle: { width: 44, height: 26, borderRadius: 13, cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 },
+  toggleThumb: { position: "absolute", top: 3, width: 20, height: 20, borderRadius: 10, background: "#fff", transition: "transform 0.2s" },
   statusArea: { display: "flex", flexDirection: "column", gap: 8 },
   statusRow: { display: "flex", alignItems: "center", gap: 7 },
   statusDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
-  statusText: { fontSize: 11, color: "#94a3b8" },
-  riskBadge: { fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 20, alignSelf: "flex-start" },
-  alertBox: { background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8, padding: 12 },
-  alertTitle: { fontWeight: 700, fontSize: 13, marginBottom: 5, color: "#f59e0b" },
-  alertSub: { fontSize: 11, color: "#94a3b8", lineHeight: 1.6, marginBottom: 10 },
-  alertBtns: { display: "flex", gap: 7 },
-  btnSafe: { flex: 1, background: "#22c55e", color: "#000", border: "none", borderRadius: 6, padding: "7px 0", fontSize: 11, fontWeight: 700, cursor: "pointer" },
-  btnSOS: { flex: 1, background: "#ef4444", color: "#fff", border: "none", borderRadius: 6, padding: "7px 0", fontSize: 11, fontWeight: 700, cursor: "pointer" },
-  coords: { fontSize: 10, color: "#334155", fontFamily: "monospace" },
-  desc: { fontSize: 11, color: "#64748b", lineHeight: 1.6, margin: 0 },
+  statusText: { fontSize: 12, color: "#94a3b8" },
+  riskBadge: { fontSize: 12, fontWeight: 600, padding: "5px 12px", borderRadius: 20, alignSelf: "flex-start" },
+  alertBox: { background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: 14 },
+  alertTitle: { fontWeight: 700, fontSize: 14, marginBottom: 6, color: "#f59e0b" },
+  alertSub: { fontSize: 12, color: "#94a3b8", lineHeight: 1.6, marginBottom: 12 },
+  alertBtns: { display: "flex", gap: 10 },
+  btnSafe: { flex: 1, minHeight: 44, background: "#22c55e", color: "#000", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+  btnSOS: { flex: 1, minHeight: 44, background: "#ef4444", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+  coords: { fontSize: 11, color: "#475569", fontFamily: "monospace" },
+  desc: { fontSize: 12, color: "#64748b", lineHeight: 1.6, margin: 0 },
 };

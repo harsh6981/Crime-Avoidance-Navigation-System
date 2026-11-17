@@ -16,8 +16,7 @@ import {
   MapPin,
   Clock
 } from "lucide-react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 const HAZARD_TYPES = [
   { value: "broken_streetlight", label: "🔦 Broken Streetlight" },
@@ -48,7 +47,7 @@ export function HazardReport({ coords, user, onClose }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: user.id,
+          user_id: user.user_id || user.id,
           hazard_type: type,
           description: desc,
           severity,
@@ -67,19 +66,22 @@ export function HazardReport({ coords, user, onClose }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{
+        border: "1px solid rgba(245,158,11,0.3)",
+        boxShadow: "0 0 32px rgba(245,158,11,0.1), 0 8px 32px rgba(0,0,0,0.7)",
+      }}>
         <div className="modal-header">
-          <div className="modal-title" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--accent-amber)" }}>
+          <div className="modal-title" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--amber)" }}>
             ⚠️ Report Safety Hazard
           </div>
-          <X size={20} color="var(--text-muted)" style={{ cursor: "pointer" }} onClick={onClose} />
+          <X size={20} color="var(--text-3)" style={{ cursor: "pointer" }} onClick={onClose} />
         </div>
 
         {done ? (
-          <div style={{ textAlign: "center", padding: "30px 0", color: "var(--accent-green)" }}>
-            <CheckCircle2 size={48} style={{ margin: "0 auto 12px" }} />
-            <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>Report Submitted!</div>
-            <div style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginTop: 4 }}>Thank you for keeping the community safe.</div>
+          <div style={{ textAlign: "center", padding: "30px 0", color: "var(--green)" }}>
+            <CheckCircle2 size={48} style={{ margin: "0 auto 12px", display: "block" }} />
+            <div style={{ fontWeight: 700, fontSize: "1.05rem" }}>Report Submitted!</div>
+            <div style={{ fontSize: "0.82rem", color: "var(--text-2)", marginTop: 4 }}>Thank you for keeping the community safe.</div>
           </div>
         ) : (
           <>
@@ -95,12 +97,12 @@ export function HazardReport({ coords, user, onClose }) {
             <div className="form-row" style={{ margin: "16px 0" }}>
               <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>Severity Rating</span>
-                <strong style={{ color: severity > 7 ? "var(--accent-red)" : "var(--accent-amber)" }}>{severity}/10</strong>
+                <strong style={{ color: severity > 7 ? "var(--red)" : "var(--amber)" }}>{severity}/10</strong>
               </label>
               <input
                 type="range" min={1} max={10} value={severity}
                 onChange={(e) => setSeverity(Number(e.target.value))}
-                style={{ width: "100%", accentColor: "var(--accent-amber)" }}
+                style={{ width: "100%", accentColor: "var(--amber)" }}
               />
             </div>
 
@@ -116,7 +118,7 @@ export function HazardReport({ coords, user, onClose }) {
 
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
               <button className="btn-outline" onClick={onClose} style={{ flex: 1 }}>Cancel</button>
-              <button className="btn-primary" onClick={submit} disabled={submitting} style={{ flex: 2, background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#fff" }}>
+              <button className="btn-primary" onClick={submit} disabled={submitting} style={{ flex: 2, background: "linear-gradient(135deg, #f59e0b, #d97706)" }}>
                 {submitting ? "Submitting..." : "Submit Hazard"}
               </button>
             </div>
@@ -133,17 +135,47 @@ export function HazardReport({ coords, user, onClose }) {
 export function SOSButton({ user }) {
   const [showModal, setShowModal] = useState(false);
   const [sosStatus, setSosStatus] = useState("");
+  const [sosLoading, setSosLoading] = useState(false);
 
-  function triggerSOSAction(actionType) {
-    if (actionType === "call") {
-      window.open("tel:112", "_self");
-    } else if (actionType === "share") {
-      navigator.clipboard.writeText("🚨 EMERGENCY: Need help at my current coordinates! View location: https://maps.google.com/?q=19.076,72.8777");
-      setSosStatus("Live location copied to clipboard! Share with your trusted contacts.");
-      setTimeout(() => setSosStatus(""), 4000);
-    } else if (actionType === "guardians") {
-      setSosStatus("🚨 Alert broadcasted to 4 nearby verified Guardians!");
-      setTimeout(() => setSosStatus(""), 4000);
+  async function triggerSOSAction(actionType) {
+    setSosLoading(true);
+    try {
+      if (actionType === "call") {
+        window.open("tel:112", "_self");
+        setSosStatus("Connecting to emergency services (112)…");
+      } else if (actionType === "share") {
+        // Try real geolocation first
+        let locationStr = "19.076, 72.8777"; // Mumbai fallback
+        try {
+          const pos = await new Promise((resolve, reject) =>
+            navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 4000 })
+          );
+          locationStr = `${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`;
+        } catch (_) {}
+        const msg = `🚨 SOS: I need help! My location: https://maps.google.com/?q=${locationStr}`;
+        await navigator.clipboard.writeText(msg).catch(() => {});
+        setSosStatus("Location copied to clipboard — share with trusted contacts now.");
+      } else if (actionType === "guardians") {
+        // Real SOS trigger via backend
+        const uid = user?.user_id || user?.id;
+        if (uid) {
+          const res = await fetch(`${BACKEND_URL}/api/emergency/trigger-sos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user_id: uid, location: { lat: 19.076, lng: 72.8777 } }),
+          }).catch(() => null);
+          if (res?.ok) {
+            setSosStatus("🚨 SOS alert sent to your trusted contacts via backend.");
+          } else {
+            setSosStatus("Could not reach backend. Call 112 directly for emergencies.");
+          }
+        } else {
+          setSosStatus("Sign in to broadcast SOS to your guardians.");
+        }
+      }
+    } finally {
+      setSosLoading(false);
+      setTimeout(() => setSosStatus(""), 5000);
     }
   }
 
@@ -153,46 +185,57 @@ export function SOSButton({ user }) {
         <button
           className="sos-btn"
           onClick={() => setShowModal(true)}
-          title="Press for Emergency SOS Modal"
+          title="Press for Emergency SOS"
+          aria-label="SOS Emergency"
         >
-          <ShieldAlert size={26} />
+          <ShieldAlert size={24} />
           <span>SOS</span>
         </button>
       </div>
 
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ border: "2px solid var(--accent-red)", boxShadow: "0 0 40px rgba(239,68,68,0.4)" }}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{
+            border: "1px solid rgba(239,68,68,0.5)",
+            boxShadow: "0 0 60px rgba(239,68,68,0.25), 0 8px 32px rgba(0,0,0,0.7)",
+            background: "linear-gradient(135deg, #160a0a, #0d1b33)",
+          }}>
             <div className="modal-header">
-              <div className="modal-title" style={{ color: "var(--accent-red)", display: "flex", alignItems: "center", gap: 8, fontSize: "1.25rem" }}>
-                <ShieldAlert size={24} /> Emergency SOS Response
+              <div className="modal-title" style={{ color: "var(--red)", display: "flex", alignItems: "center", gap: 8, fontSize: "1.1rem" }}>
+                <ShieldAlert size={22} /> Emergency SOS Response
               </div>
-              <X size={20} color="var(--text-muted)" style={{ cursor: "pointer" }} onClick={() => setShowModal(false)} />
+              <X size={20} color="var(--text-3)" style={{ cursor: "pointer" }} onClick={() => setShowModal(false)} />
             </div>
 
-            <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: 16 }}>
-              Select an immediate action below. Your live GPS location will be automatically captured.
+            <p style={{ fontSize: "0.82rem", color: "var(--text-2)", marginBottom: 16, lineHeight: 1.6 }}>
+              Select an immediate action. Your live GPS location will be automatically captured.
             </p>
 
             {sosStatus && (
-              <div style={{ background: "rgba(34,197,94,0.15)", border: "1px solid var(--accent-green)", color: "var(--accent-green)", padding: 12, borderRadius: 10, fontSize: "0.82rem", fontWeight: 600, marginBottom: 16 }}>
+              <div style={{
+                background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)",
+                color: "var(--green)", padding: 12, borderRadius: 10,
+                fontSize: "0.82rem", fontWeight: 600, marginBottom: 16
+              }}>
                 ✓ {sosStatus}
               </div>
             )}
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <button
                 className="btn-primary"
                 onClick={() => triggerSOSAction("call")}
-                style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)", color: "#fff", padding: 14, justifyContent: "flex-start", paddingLeft: 20 }}
+                disabled={sosLoading}
+                style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)", padding: "14px 20px", justifyContent: "flex-start", borderRadius: 10 }}
               >
-                <PhoneCall size={20} /> Call Emergency Contacts / 112
+                <PhoneCall size={20} /> Call Emergency Services (112)
               </button>
 
               <button
                 className="btn-primary"
                 onClick={() => triggerSOSAction("share")}
-                style={{ background: "linear-gradient(135deg, #3b82f6, #2563eb)", color: "#fff", padding: 14, justifyContent: "flex-start", paddingLeft: 20 }}
+                disabled={sosLoading}
+                style={{ background: "linear-gradient(135deg, #00b4d8, #0077b6)", padding: "14px 20px", justifyContent: "flex-start", borderRadius: 10 }}
               >
                 <Share2 size={20} /> Share Live GPS Location
               </button>
@@ -200,14 +243,15 @@ export function SOSButton({ user }) {
               <button
                 className="btn-primary"
                 onClick={() => triggerSOSAction("guardians")}
-                style={{ background: "linear-gradient(135deg, #8b5cf6, #7c3aed)", color: "#fff", padding: 14, justifyContent: "flex-start", paddingLeft: 20 }}
+                disabled={sosLoading}
+                style={{ background: "linear-gradient(135deg, #8b5cf6, #7c3aed)", padding: "14px 20px", justifyContent: "flex-start", borderRadius: 10 }}
               >
-                <Users size={20} /> Broadcast Alert to Nearby Guardians
+                <Users size={20} /> Alert Trusted Contacts
               </button>
             </div>
 
-            <button className="btn-outline" onClick={() => setShowModal(false)} style={{ width: "100%", marginTop: 16 }}>
-              Close Emergency Modal
+            <button className="btn-outline" onClick={() => setShowModal(false)} style={{ width: "100%", marginTop: 14 }}>
+              Close
             </button>
           </div>
         </div>

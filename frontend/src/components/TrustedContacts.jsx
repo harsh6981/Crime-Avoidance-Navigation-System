@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config/api";
 
 /**
  * TrustedContacts — Emergency Contact Manager
@@ -17,15 +16,28 @@ export default function TrustedContacts({ user, onClose }) {
   const [saved,    setSaved]    = useState(false);
   const [error,    setError]    = useState("");
 
+  const uid = user?.id || user?.user_id;
+
   // Load existing contacts on open
   useEffect(() => {
-    if (!user) return;
+    if (!uid) return;
     // Try fetching from localStorage as quick cache
-    const cached = localStorage.getItem(`contacts_${user.id}`);
+    const cached = localStorage.getItem(`contacts_${uid}`);
     if (cached) {
       try { setContacts(JSON.parse(cached)); } catch {}
     }
-  }, [user]);
+
+    // Also fetch latest from backend
+    fetch(`${BACKEND_URL}/api/users/trusted-contacts?user_id=${encodeURIComponent(uid)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.contacts && Array.isArray(data.contacts)) {
+          setContacts(data.contacts);
+          localStorage.setItem(`contacts_${uid}`, JSON.stringify(data.contacts));
+        }
+      })
+      .catch(() => {});
+  }, [uid]);
 
   function addContact() {
     const name  = newName.trim();
@@ -49,34 +61,39 @@ export default function TrustedContacts({ user, onClose }) {
   }
 
   function removeContact(id) {
-    setContacts((prev) => prev.filter((c) => c.id !== id));
+    setContacts((prev) => prev.filter((c) => (c.id ? c.id !== id : c.phone !== id)));
   }
 
   async function saveContacts() {
-    if (!user) { setError("Please sign in first."); return; }
+    if (!uid) { setError("Please sign in first."); return; }
     setSaving(true);
+
+    const token = localStorage.getItem("token") || localStorage.getItem("safepath_token") || "";
 
     try {
       const res = await fetch(
-        `${BACKEND_URL}/api/users/trusted-contacts?user_id=${user.id}`,
+        `${BACKEND_URL}/api/users/trusted-contacts`,
         {
-          method: "PUT",
+          method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("safepath_token") || ""}`,
+            Authorization: token ? `Bearer ${token}` : "",
           },
-          body: JSON.stringify(contacts),
+          body: JSON.stringify({
+            user_id: uid,
+            contacts: contacts.map((c) => ({ name: c.name, phone: c.phone })),
+          }),
         }
       );
       if (!res.ok) throw new Error("Save failed");
 
       // Cache locally
-      localStorage.setItem(`contacts_${user.id}`, JSON.stringify(contacts));
+      localStorage.setItem(`contacts_${uid}`, JSON.stringify(contacts));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch {
-      // Mock save for offline/dev
-      localStorage.setItem(`contacts_${user.id}`, JSON.stringify(contacts));
+      // Fallback save for offline/dev
+      localStorage.setItem(`contacts_${uid}`, JSON.stringify(contacts));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } finally {
